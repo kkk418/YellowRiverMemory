@@ -1,0 +1,11 @@
+{
+  "modelVersion": "5.0.2",
+  "name": "yellow-river-memory",
+  "version": "1.0.0",
+  "description": "黄河记忆·黄河文化分布式数字档案",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {},
+  "devDependencies": {}
+}

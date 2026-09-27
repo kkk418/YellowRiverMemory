@@ -1,0 +1,18 @@
+# DevEco Studio / Hvigor generated files
+.hvigor/
+.idea/
+**/build/
+**/.preview/
+oh_modules/
+node_modules/
+
+# Local machine and editor files
+*.iml
+.DS_Store
+Thumbs.db
+local.properties
+
+# Generated packages and logs
+*.hap
+*.hsp
+*.log
