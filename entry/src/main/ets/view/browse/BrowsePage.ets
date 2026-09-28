@@ -3,11 +3,12 @@ import { Site, Artifact } from '../../model/entity/Entities';
 import { SiteCard } from '../components/SiteCard';
 import { ArtifactCard } from '../components/ArtifactCard';
 import { TagChip } from '../components/TagChip';
-import { EraMeta, CityMeta, SiteTypeMeta } from '../../common/constants/AppMeta';
-import { EraType, CityType, SiteType } from '../../common/constants/Enums';
+import { EraMeta, CityMeta, SiteTypeMeta, ArtifactTypeMeta } from '../../common/constants/AppMeta';
+import { EraType, CityType, SiteType, ArtifactType } from '../../common/constants/Enums';
 import { FilterCriteria } from '../../model/dto/DTOs';
 import { EmptyState } from '../components/EmptyState';
 import { colors } from '../../common/constants/Colors';
+import { Logger } from '../../common/utils/Logger';
 
 interface FilterOption {
   key: string;
@@ -28,9 +29,18 @@ export struct BrowsePage {
   @State sites: Site[] = [];
   @State artifacts: Artifact[] = [];
   @State loading: boolean = true;
+  @State loadingMore: boolean = false;
+  @State loadError: boolean = false;
+  @State moreError: boolean = false;
+  @State siteHasMore: boolean = false;
+  @State artifactHasMore: boolean = false;
+  private sitePage: number = 1;
+  private artifactPage: number = 1;
+  private loadGeneration: number = 0;
   // 筛选状态（多选用Set）
   @State selectedEras: Set<string> = new Set();
   @State selectedTypes: Set<string> = new Set();
+  @State selectedArtifactTypes: Set<string> = new Set();
   @State selectedCities: Set<string> = new Set();
 
   private makePath(name: string, param?: Object): NavPathInfo {
@@ -48,21 +58,73 @@ export struct BrowsePage {
   }
 
   async loadData() {
+    const generation = ++this.loadGeneration;
     this.loading = true;
-    const criteria: FilterCriteria = {
-      keyword: this.keyword.trim() || undefined,
-      era: this.selectedEras.size > 0 ? Array.from(this.selectedEras) as EraType[] : undefined,
-      siteType: this.selectedTypes.size > 0 ? Array.from(this.selectedTypes) as SiteType[] : undefined,
-      city: this.selectedCities.size > 0 ? Array.from(this.selectedCities) as CityType[] : undefined,
-    };
+    this.loadingMore = false;
+    this.loadError = false;
+    this.moreError = false;
+    this.sitePage = 1;
+    this.artifactPage = 1;
+    const criteria = this.currentCriteria();
     try {
       const svc = CultureService.getInstance();
       const siteRes = await svc.querySites(criteria, 1, 50);
-      this.sites = siteRes.list;
       const artRes = await svc.queryArtifacts(criteria, 1, 50);
+      if (generation !== this.loadGeneration) return;
+      this.sites = siteRes.list;
+      this.siteHasMore = siteRes.hasMore;
       this.artifacts = artRes.list;
-    } catch (e) {}
-    this.loading = false;
+      this.artifactHasMore = artRes.hasMore;
+    } catch (e) {
+      if (generation !== this.loadGeneration) return;
+      Logger.error('BrowsePage', `loadData failed: ${e}`);
+      this.loadError = true;
+      this.sites = [];
+      this.artifacts = [];
+    }
+    if (generation === this.loadGeneration) this.loading = false;
+  }
+
+  private currentCriteria(): FilterCriteria {
+    return {
+      keyword: this.keyword.trim() || undefined,
+      era: this.selectedEras.size > 0 ? Array.from(this.selectedEras) as EraType[] : undefined,
+      siteType: this.selectedTypes.size > 0 ? Array.from(this.selectedTypes) as SiteType[] : undefined,
+      artifactType: this.selectedArtifactTypes.size > 0 ? Array.from(this.selectedArtifactTypes) as ArtifactType[] : undefined,
+      city: this.selectedCities.size > 0 ? Array.from(this.selectedCities) as CityType[] : undefined,
+    };
+  }
+
+  private async loadMore(): Promise<void> {
+    if (this.loading || this.loadingMore) return;
+    const generation = this.loadGeneration;
+    const tab = this.activeTab;
+    const criteria = this.currentCriteria();
+    this.loadingMore = true;
+    this.moreError = false;
+    try {
+      const svc = CultureService.getInstance();
+      if (tab === 0 && this.siteHasMore) {
+        const next = this.sitePage + 1;
+        const result = await svc.querySites(criteria, next, 50);
+        if (generation !== this.loadGeneration) return;
+        this.sites = [...this.sites, ...result.list];
+        this.sitePage = next;
+        this.siteHasMore = result.hasMore;
+      } else if (tab === 1 && this.artifactHasMore) {
+        const next = this.artifactPage + 1;
+        const result = await svc.queryArtifacts(criteria, next, 50);
+        if (generation !== this.loadGeneration) return;
+        this.artifacts = [...this.artifacts, ...result.list];
+        this.artifactPage = next;
+        this.artifactHasMore = result.hasMore;
+      }
+    } catch (e) {
+      if (generation !== this.loadGeneration) return;
+      Logger.error('BrowsePage', `loadMore failed: ${e}`);
+      this.moreError = true;
+    }
+    if (generation === this.loadGeneration) this.loadingMore = false;
   }
 
   build() {
@@ -134,6 +196,13 @@ export struct BrowsePage {
           Text('查阅中…').fontSize(12).fontColor($r('app.color.text_tertiary'))
         }
         .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+      } else if (this.loadError) {
+        Column({ space: 12 }) {
+          Text('内容加载失败，请重试').fontSize(13).fontColor(colors.textSecondary)
+          Button('重新加载').onClick(() => { this.loadData(); })
+        }
+        .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
       } else {
         if (this.activeTab === 0) {
           this.SitesList()
@@ -188,6 +257,11 @@ export struct BrowsePage {
           SiteTypeMeta.ALL.map((t: SiteTypeMeta): FilterOption => ({ key: t.code, label: t.name })),
           this.selectedTypes,
           (k: string): void => { this.toggleSet(this.selectedTypes, k); })
+      } else {
+        this.FilterGroup('文物类型', 'TYPE',
+          ArtifactTypeMeta.ALL.map((t: ArtifactTypeMeta): FilterOption => ({ key: t.key, label: t.label })),
+          this.selectedArtifactTypes,
+          (k: string): void => { this.toggleSet(this.selectedArtifactTypes, k); })
       }
       // 底部操作
       Row({ space: 12 }) {
@@ -202,6 +276,7 @@ export struct BrowsePage {
             this.selectedEras.clear();
             this.selectedCities.clear();
             this.selectedTypes.clear();
+            this.selectedArtifactTypes.clear();
             this.showFilterPanel = false;
             this.loadData();
           })
@@ -265,6 +340,10 @@ export struct BrowsePage {
               this.navPathStack.pushPath({ name: 'siteDetail', param: s });
             } })
           })
+          if (this.siteHasMore) {
+            Button(this.loadingMore ? '加载中…' : (this.moreError ? '加载失败，重试' : '加载更多遗址'))
+              .onClick(() => { this.loadMore(); })
+          }
         }
         .width('100%')
         .padding({ left: 20, right: 20, top: 16, bottom: 40 })
@@ -285,18 +364,25 @@ export struct BrowsePage {
       .layoutWeight(1)
     } else {
       Scroll() {
-        Grid() {
-          ForEach(this.artifacts, (a: Artifact) => {
-            GridItem() {
-              ArtifactCard({ artifact: a, onTap: (): void => {
-                this.navPathStack.pushPath({ name: 'artifactDetail', param: a });
-              } })
-            }
-          })
+        Column() {
+          Grid() {
+            ForEach(this.artifacts, (a: Artifact) => {
+              GridItem() {
+                ArtifactCard({ artifact: a, onTap: (): void => {
+                  this.navPathStack.pushPath({ name: 'artifactDetail', param: a });
+                } })
+              }
+            })
+          }
+          .columnsTemplate('1fr 1fr')
+          .columnsGap(10)
+          .rowsGap(12)
+          if (this.artifactHasMore) {
+            Button(this.loadingMore ? '加载中…' : (this.moreError ? '加载失败，重试' : '加载更多文物'))
+              .margin({ top: 16 })
+              .onClick(() => { this.loadMore(); })
+          }
         }
-        .columnsTemplate('1fr 1fr')
-        .columnsGap(10)
-        .rowsGap(12)
         .width('100%')
         .padding({ left: 20, right: 20, top: 16, bottom: 40 })
       }
@@ -312,10 +398,12 @@ export struct BrowsePage {
     // 触发UI刷新：赋值新集合
     if (set === this.selectedEras) this.selectedEras = new Set(set);
     else if (set === this.selectedTypes) this.selectedTypes = new Set(set);
+    else if (set === this.selectedArtifactTypes) this.selectedArtifactTypes = new Set(set);
     else if (set === this.selectedCities) this.selectedCities = new Set(set);
   }
 
   private hasFilter(): boolean {
-    return this.selectedEras.size > 0 || this.selectedTypes.size > 0 || this.selectedCities.size > 0;
+    return this.selectedEras.size > 0 || this.selectedCities.size > 0 ||
+      (this.activeTab === 0 ? this.selectedTypes.size > 0 : this.selectedArtifactTypes.size > 0);
   }
 }

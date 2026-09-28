@@ -15,6 +15,7 @@ const TAG = 'EntryAbility';
 
 export default class EntryAbility extends UIAbility {
   private initPromise: Promise<void> = Promise.resolve();
+  private windowReady: boolean = false;
 
   onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     this.initPromise = this.initialize();
@@ -58,7 +59,12 @@ export default class EntryAbility extends UIAbility {
   onForeground(): void {
     Logger.info(TAG, 'onForeground');
     EventBus.getInstance().emit(AppEvents.APP_FOREGROUND, null);
-    DistributedDataService.getInstance().setOnline();
+    // The initial foreground event can arrive before the window and DB are ready.
+    // The window callback initializes distributed sync after the first load.
+    if (this.windowReady) {
+      this.initPromise.then(() => DistributedDataService.getInstance().setOnline())
+        .catch((e: Error) => Logger.warn(TAG, `foreground sync skipped: ${e}`));
+    }
   }
 
   onBackground(): void {
@@ -91,6 +97,7 @@ export default class EntryAbility extends UIAbility {
           return;
         }
         Logger.info(TAG, 'loadContent success');
+        this.windowReady = true;
         DistributedDataService.getInstance().init(this.context)
           .then(() => Logger.info(TAG, 'DistributedDataService inited'))
           .catch((e: Error) => Logger.warn(TAG, `DistributedDataService init failed (non-fatal): ${e}`));
@@ -104,6 +111,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageDestroy() {
+    this.windowReady = false;
     Logger.info(TAG, 'onWindowStageDestroy');
   }
 

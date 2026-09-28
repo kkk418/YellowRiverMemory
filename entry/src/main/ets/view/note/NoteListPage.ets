@@ -18,6 +18,7 @@ interface NoteGroup {
 export struct NoteListPage {
   @Consume('navPathStack') navPathStack: NavPathStack;
   @State notes: Note[] = [];
+  @State countNotes: Note[] = [];
   @State groups: NoteGroup[] = [];
   @State keyword: string = '';
   @State filter: 'all' | NoteTargetType = 'all';
@@ -45,6 +46,7 @@ export struct NoteListPage {
           StringUtil.parseTagsArray(n.tags).some(t => t.toLowerCase().includes(kw))
         );
       }
+      this.countNotes = list;
       if (this.filter !== 'all') {
         list = list.filter(n => n.targetType === this.filter);
       }
@@ -202,13 +204,13 @@ export struct NoteListPage {
       // 筛选Tab
       Scroll() {
         Row({ space: 4 }) {
-          this.FilterTab('全部', 'all', this.notes.length)
+          this.FilterTab('全部', 'all', this.countNotes.length)
           this.FilterTab('自由笔记', NoteTargetType.STANDALONE,
-            this.notes.filter(n => n.targetType === NoteTargetType.STANDALONE || !n.targetId).length)
+            this.countNotes.filter(n => n.targetType === NoteTargetType.STANDALONE).length)
           this.FilterTab('遗址相关', NoteTargetType.SITE,
-            this.notes.filter(n => n.targetType === NoteTargetType.SITE).length)
+            this.countNotes.filter(n => n.targetType === NoteTargetType.SITE).length)
           this.FilterTab('文物相关', NoteTargetType.ARTIFACT,
-            this.notes.filter(n => n.targetType === NoteTargetType.ARTIFACT).length)
+            this.countNotes.filter(n => n.targetType === NoteTargetType.ARTIFACT).length)
         }
       }
       .scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)

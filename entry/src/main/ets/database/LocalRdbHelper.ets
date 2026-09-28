@@ -124,6 +124,7 @@ const CREATE_TABLE_SQL: string[] = [
     isDeleted INTEGER DEFAULT 0,
     deviceId TEXT
   );`,
+  // Legacy history remains readable for v1-to-v2 migration; new visits use history_record.
   `CREATE TABLE IF NOT EXISTS browse_history (
     id TEXT PRIMARY KEY,
     targetType TEXT NOT NULL,
@@ -184,8 +185,12 @@ const CREATE_INDEX_SQL: string[] = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_favorite_target_unique ON favorite(targetType, targetId);`,
 ];
 
+const TOPIC_RELATION_UNIQUE_INDEX =
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_relation_identity ON topic_relation(topicId, targetType, targetId);`;
+
 export class LocalRdbHelper {
   private static rdbStore: relationalStore.RdbStore | null = null;
+  private static transactionQueue: Promise<void> = Promise.resolve();
 
   static async init(context: Context): Promise<void> {
     if (LocalRdbHelper.rdbStore) return;
@@ -198,6 +203,9 @@ export class LocalRdbHelper {
       await LocalRdbHelper.createTables();
       Logger.info(TAG, 'RDB init success');
     } catch (e) {
+      // A failed migration must not leave an apparently initialized store in memory.
+      // The next initialization attempt should retry the unfinished schema work.
+      LocalRdbHelper.rdbStore = null;
       Logger.error(TAG, `RDB init failed: ${e}`);
       throw new Error(String(e));
     }
@@ -220,18 +228,53 @@ export class LocalRdbHelper {
       for (const sql of CREATE_INDEX_SQL) {
         await store.executeSql(sql);
       }
+      await store.executeSql(TOPIC_RELATION_UNIQUE_INDEX);
       store.version = AppConstants.DB_VERSION;
       Logger.info(TAG, `Tables created, version=${AppConstants.DB_VERSION}`);
-    } else if (store.version < 2) {
-      await LocalRdbHelper.migrateV1ToV2();
-      store.version = 2;
-      Logger.info(TAG, 'Database migrated from v1 to v2');
     } else {
-      // Idempotent additions within the current schema version are safe for
-      // development installs created before the sync metadata table existed.
+      if (store.version < 2) {
+        await LocalRdbHelper.migrateV1ToV2();
+        store.version = 2;
+        Logger.info(TAG, 'Database migrated from v1 to v2');
+      }
+      // Repair partial development installs that already claimed schema v2.
       for (const sql of CREATE_TABLE_SQL) await store.executeSql(sql);
+      await LocalRdbHelper.ensureColumn('artifact', 'isNationalTreasure', 'INTEGER DEFAULT 0');
+      await LocalRdbHelper.ensureColumn('poetry', 'createdAt', 'INTEGER');
+      await LocalRdbHelper.ensureColumn('topic_relation', 'isDeleted', 'INTEGER DEFAULT 0');
+      if (store.version < 3) {
+        await LocalRdbHelper.migrateV2ToV3();
+        store.version = 3;
+      }
       for (const sql of CREATE_INDEX_SQL) await store.executeSql(sql);
+      await store.executeSql(TOPIC_RELATION_UNIQUE_INDEX);
     }
+  }
+
+  private static async migrateV2ToV3(): Promise<void> {
+    await LocalRdbHelper.runInTransaction(async () => {
+      for (const table of ['favorite', 'note', 'topic', 'topic_relation']) {
+        await LocalRdbHelper.execute(
+          `UPDATE ${table} SET updatedAt=COALESCE(updatedAt, createdAt, 0) WHERE updatedAt IS NULL`);
+      }
+      const relations = await LocalRdbHelper.query<Record<string, Object>>(
+        'SELECT id, topicId, targetType, targetId FROM topic_relation ORDER BY COALESCE(updatedAt, createdAt, 0) DESC, createdAt DESC, id DESC');
+      const seen = new Set<string>();
+      for (const relation of relations) {
+        const key = `${String(relation.topicId)}:${String(relation.targetType)}:${String(relation.targetId)}`;
+        if (seen.has(key)) {
+          const id = String(relation.id);
+          await LocalRdbHelper.execute('DELETE FROM topic_relation WHERE id=?', [id]);
+          await LocalRdbHelper.execute('DELETE FROM sync_outbox WHERE entityType=? AND entityId=?',
+            ['topic_relation', id]);
+          await LocalRdbHelper.execute('DELETE FROM sync_local_version WHERE id=?', [`topic_relation/${id}`]);
+        } else {
+          seen.add(key);
+        }
+      }
+      await LocalRdbHelper.execute(TOPIC_RELATION_UNIQUE_INDEX);
+    });
+    Logger.info(TAG, 'Database migrated from v2 to v3');
   }
 
   private static async migrateV1ToV2(): Promise<void> {
@@ -264,7 +307,7 @@ export class LocalRdbHelper {
       // Keep the newest record for each target. The unique constraint then
       // guarantees that local devices share the same one-favorite-per-target rule.
       const favorites = await LocalRdbHelper.query<Record<string, Object>>(
-        'SELECT * FROM favorite ORDER BY updatedAt DESC, createdAt DESC, id DESC', []);
+        'SELECT * FROM favorite ORDER BY COALESCE(updatedAt, createdAt, 0) DESC, createdAt DESC, id DESC', []);
       const seen = new Set<string>();
       const retained: Record<string, Object>[] = [];
       for (const favorite of favorites) {
@@ -299,6 +342,10 @@ export class LocalRdbHelper {
 
   static favoriteId(targetType: string, targetId: string): string {
     return `favorite_${targetType}_${targetId}`;
+  }
+
+  static topicRelationId(topicId: string, targetType: string, targetId: string): string {
+    return `topic_relation_${topicId}_${targetType}_${targetId}`;
   }
 
   /** 通用查询：返回对象数组 */
@@ -371,15 +418,24 @@ export class LocalRdbHelper {
   }
 
   /** 在事务中执行一批操作 */
-  static async runInTransaction(operation: () => Promise<void>): Promise<void> {
+  static async runInTransaction<T>(operation: () => Promise<T>): Promise<T> {
     const store = LocalRdbHelper.getStore();
-    await store.beginTransaction();
+    const previous = LocalRdbHelper.transactionQueue;
+    let release: () => void = () => {};
+    LocalRdbHelper.transactionQueue = new Promise<void>((resolve: () => void) => { release = resolve; });
+    await previous;
     try {
-      await operation();
-      await store.commit();
-    } catch (e) {
-      await store.rollBack();
-      throw new Error(String(e));
+      await store.beginTransaction();
+      try {
+        const result = await operation();
+        await store.commit();
+        return result;
+      } catch (e) {
+        await store.rollBack();
+        throw new Error(String(e));
+      }
+    } finally {
+      release();
     }
   }
 }

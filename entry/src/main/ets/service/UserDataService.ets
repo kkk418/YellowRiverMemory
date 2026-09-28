@@ -4,7 +4,7 @@
  */
 import { relationalStore, preferences } from '@kit.ArkData';
 import { LocalRdbHelper } from '../database/LocalRdbHelper';
-import { Favorite, Note, Topic, TopicRelation, BrowseHistory, HistoryRecord } from '../model/entity/Entities';
+import { Favorite, Note, Topic, TopicRelation, HistoryRecord } from '../model/entity/Entities';
 import { FavoriteTargetType, NoteTargetType } from '../common/constants/Enums';
 import { TagMeta } from '../common/constants/AppMeta';
 import { DateUtil } from '../common/utils/DateUtil';
@@ -26,6 +26,12 @@ interface IdRow {
 
 interface CountRow {
   c: number;
+}
+
+interface NoteVersionRow {
+  updatedAt: number;
+  deviceId: string;
+  isDeleted: number;
 }
 
 export class UserDataService {
@@ -94,10 +100,12 @@ export class UserDataService {
     await this.ensureReady();
     const previous = await LocalRdbHelper.query<Favorite>(
       'SELECT updatedAt, deviceId FROM favorite WHERE targetType=? AND targetId=? LIMIT 1', [targetType, targetId]);
-    const id = await this.getOrCreateFavoriteId(targetType, targetId, tags);
+    let id = LocalRdbHelper.favoriteId(targetType, targetId);
+    await this.commitChange('favorite', `${targetType}:${targetId}`, async () => {
+      id = await this.getOrCreateFavoriteId(targetType, targetId, tags);
+    }, previous[0]?.updatedAt, previous[0]?.deviceId);
     this.favCache.add(`${targetType}:${targetId}`);
     EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType, targetId, favorited: true });
-    await this.pushToDDS('favorite', id, previous[0]?.updatedAt, previous[0]?.deviceId);
     return id;
   }
 
@@ -129,14 +137,17 @@ export class UserDataService {
   async removeFavorite(targetType: FavoriteTargetType, targetId: string): Promise<void> {
     await this.ensureReady();
     const rows = await LocalRdbHelper.query<Favorite>(
-      'SELECT id, updatedAt, deviceId FROM favorite WHERE targetType=? AND targetId=? LIMIT 1', [targetType, targetId]);
+      'SELECT id, updatedAt, deviceId FROM favorite WHERE targetType=? AND targetId=? AND isDeleted=0 LIMIT 1',
+      [targetType, targetId]);
+    if (rows.length === 0) return;
     const now = this.nextWriteTime(rows[0]?.updatedAt ?? 0);
     const pred = new relationalStore.RdbPredicates('favorite');
     pred.equalTo('targetType', targetType).and().equalTo('targetId', targetId).and().equalTo('isDeleted', 0);
-    await LocalRdbHelper.update('favorite', { 'isDeleted': 1, 'updatedAt': now, 'deviceId': this.localDeviceId }, pred);
+    await this.commitChange('favorite', `${targetType}:${targetId}`, async () => {
+      await LocalRdbHelper.update('favorite', { 'isDeleted': 1, 'updatedAt': now, 'deviceId': this.localDeviceId }, pred);
+    }, rows[0].updatedAt, rows[0].deviceId);
     this.favCache.delete(`${targetType}:${targetId}`);
     EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType, targetId, favorited: false });
-    if (rows.length > 0) await this.pushToDDS('favorite', rows[0].id, rows[0].updatedAt, rows[0].deviceId);
   }
 
   async isFavorited(targetType: FavoriteTargetType, targetId: string): Promise<boolean> {
@@ -178,44 +189,67 @@ export class UserDataService {
     await this.ensureReady();
     const id = DateUtil.uuid();
     const now = this.nextWriteTime();
-    await LocalRdbHelper.insert('note', {
-      'id': id, 'title': title, 'content': content,
-      'targetType': targetType, 'targetId': targetId ?? null,
-      'tags': StringUtil.toTagsArray(tags),
-      'images': null,
-      'createdAt': now, 'updatedAt': now,
-      'isDeleted': 0, 'deviceId': this.localDeviceId,
+    await this.commitChange('note', id, async () => {
+      await LocalRdbHelper.insert('note', {
+        'id': id, 'title': title, 'content': content,
+        'targetType': targetType, 'targetId': targetId ?? null,
+        'tags': StringUtil.toTagsArray(tags),
+        'images': null,
+        'createdAt': now, 'updatedAt': now,
+        'isDeleted': 0, 'deviceId': this.localDeviceId,
+      });
     });
     EventBus.getInstance().emit(AppEvents.NOTE_CHANGED, { id });
-    await this.pushToDDS('note', id);
     return id;
   }
 
-  async updateNote(id: string, title: string, content: string, tags: string[]): Promise<void> {
+  async updateNote(id: string, title: string, content: string, tags: string[],
+    expectedUpdatedAt?: number, expectedDeviceId?: string): Promise<void> {
     await this.ensureReady();
-    const existing = await LocalRdbHelper.query<Note>('SELECT updatedAt, deviceId FROM note WHERE id=? LIMIT 1', [id]);
+    const existing = await LocalRdbHelper.query<NoteVersionRow>(
+      'SELECT updatedAt, deviceId, isDeleted FROM note WHERE id=? LIMIT 1', [id]);
+    if (existing.length === 0) throw new Error(`Note not found: ${id}`);
+    const baseTime = expectedUpdatedAt ?? existing[0].updatedAt;
+    const baseDevice = expectedDeviceId ?? existing[0].deviceId;
     const pred = new relationalStore.RdbPredicates('note');
     pred.equalTo('id', id);
-    await LocalRdbHelper.update('note', {
-      'title': title, 'content': content,
-      'tags': StringUtil.toTagsArray(tags),
-      'updatedAt': this.nextWriteTime(existing[0]?.updatedAt ?? 0),
-      'deviceId': this.localDeviceId,
-    }, pred);
+    await this.commitChange('note', id, async () => {
+      await this.assertCurrentNoteVersion(id, baseTime, baseDevice);
+      await LocalRdbHelper.update('note', {
+        'title': title, 'content': content,
+        'tags': StringUtil.toTagsArray(tags),
+        'updatedAt': this.nextWriteTime(baseTime),
+        'deviceId': this.localDeviceId,
+      }, pred);
+    }, baseTime, baseDevice);
     EventBus.getInstance().emit(AppEvents.NOTE_CHANGED, { id });
-    await this.pushToDDS('note', id, existing[0]?.updatedAt, existing[0]?.deviceId);
   }
 
-  async deleteNote(id: string): Promise<void> {
+  async deleteNote(id: string, expectedUpdatedAt?: number, expectedDeviceId?: string): Promise<void> {
     await this.ensureReady();
-    const existing = await LocalRdbHelper.query<Note>('SELECT updatedAt, deviceId FROM note WHERE id=? LIMIT 1', [id]);
+    const existing = await LocalRdbHelper.query<NoteVersionRow>(
+      'SELECT updatedAt, deviceId, isDeleted FROM note WHERE id=? LIMIT 1', [id]);
+    if (existing.length === 0 || existing[0].isDeleted === 1) return;
+    const baseTime = expectedUpdatedAt ?? existing[0].updatedAt;
+    const baseDevice = expectedDeviceId ?? existing[0].deviceId;
     const pred = new relationalStore.RdbPredicates('note');
     pred.equalTo('id', id);
-    await LocalRdbHelper.update('note', {
-      'isDeleted': 1, 'updatedAt': this.nextWriteTime(existing[0]?.updatedAt ?? 0), 'deviceId': this.localDeviceId,
-    }, pred);
+    await this.commitChange('note', id, async () => {
+      await this.assertCurrentNoteVersion(id, baseTime, baseDevice);
+      await LocalRdbHelper.update('note', {
+        'isDeleted': 1, 'updatedAt': this.nextWriteTime(baseTime), 'deviceId': this.localDeviceId,
+      }, pred);
+    }, baseTime, baseDevice);
     EventBus.getInstance().emit(AppEvents.NOTE_CHANGED, { id, deleted: true });
-    await this.pushToDDS('note', id, existing[0]?.updatedAt, existing[0]?.deviceId);
+  }
+
+  private async assertCurrentNoteVersion(id: string, updatedAt: number, deviceId: string): Promise<void> {
+    const current = await LocalRdbHelper.query<NoteVersionRow>(
+      'SELECT updatedAt, deviceId, isDeleted FROM note WHERE id=? LIMIT 1', [id]);
+    if (current.length === 0 || current[0].isDeleted === 1 ||
+      current[0].updatedAt !== updatedAt || (current[0].deviceId ?? '') !== (deviceId ?? '')) {
+      throw new Error('笔记已在其他设备修改或删除，请重新打开后再保存');
+    }
   }
 
   async listNotes(targetType?: NoteTargetType, targetId?: string): Promise<Note[]> {
@@ -232,55 +266,54 @@ export class UserDataService {
     return list[0] ?? null;
   }
 
-  // ================== 浏览历史 ==================
-  async addBrowseHistory(targetType: FavoriteTargetType, targetId: string, duration?: number): Promise<void> {
-    try {
-      const id = DateUtil.uuid();
-      await LocalRdbHelper.insert('browse_history', {
-        'id': id, 'targetType': targetType, 'targetId': targetId,
-        'viewedAt': DateUtil.now(), 'duration': duration ?? 0,
-      });
-      // 仅保留最近200条
-      await LocalRdbHelper.execute(
-        `DELETE FROM browse_history WHERE id NOT IN (SELECT id FROM browse_history ORDER BY viewedAt DESC LIMIT 200)`
-      );
-      EventBus.getInstance().emit(AppEvents.BROWSE_HISTORY_ADDED, { targetType, targetId });
-    } catch (e) {
-      Logger.warn(TAG, `addBrowseHistory: ${e}`);
-    }
-  }
-
-  async getRecentBrowsed(limit: number = 10): Promise<BrowseHistory[]> {
-    return LocalRdbHelper.query<BrowseHistory>(
-      `SELECT * FROM browse_history ORDER BY viewedAt DESC LIMIT ?`, [limit]
-    );
-  }
-
   // ================== 主题（知识库节点）==================
   async createTopic(name: string, description?: string, coverColor?: string, iconEmoji?: string): Promise<string> {
     await this.ensureReady();
     const id = DateUtil.uuid();
     const now = this.nextWriteTime();
-    await LocalRdbHelper.insert('topic', {
-      'id': id, 'name': name, 'description': description ?? null,
-      'coverColor': coverColor ?? null, 'iconEmoji': iconEmoji ?? null,
-      'createdAt': now, 'updatedAt': now, 'isDeleted': 0, 'deviceId': this.localDeviceId,
+    await this.commitChange('topic', id, async () => {
+      await LocalRdbHelper.insert('topic', {
+        'id': id, 'name': name, 'description': description ?? null,
+        'coverColor': coverColor ?? null, 'iconEmoji': iconEmoji ?? null,
+        'createdAt': now, 'updatedAt': now, 'isDeleted': 0, 'deviceId': this.localDeviceId,
+      });
     });
     EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id });
-    await this.pushToDDS('topic', id);
     return id;
   }
 
   async deleteTopic(id: string): Promise<void> {
     await this.ensureReady();
-    const existing = await LocalRdbHelper.query<Topic>('SELECT updatedAt, deviceId FROM topic WHERE id=? LIMIT 1', [id]);
-    const pred = new relationalStore.RdbPredicates('topic');
-    pred.equalTo('id', id);
-    await LocalRdbHelper.update('topic', {
-      'isDeleted': 1, 'updatedAt': this.nextWriteTime(existing[0]?.updatedAt ?? 0), 'deviceId': this.localDeviceId,
-    }, pred);
-    EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id, deleted: true });
-    await this.pushToDDS('topic', id, existing[0]?.updatedAt, existing[0]?.deviceId);
+    const distributedModule = await import('./DistributedDataService');
+    let changed = false;
+    await distributedModule.DistributedDataService.getInstance().commitLocalBatch(async (record) => {
+      const topics = await LocalRdbHelper.query<Topic>(
+        'SELECT id, updatedAt, deviceId, isDeleted FROM topic WHERE id=? LIMIT 1', [id]);
+      if (topics.length === 0) return;
+      const topic = topics[0];
+      // Query before tombstoning the topic: listTopicRelations intentionally hides deleted topics.
+      const relations = await LocalRdbHelper.query<TopicRelation>(
+        'SELECT id, updatedAt, deviceId FROM topic_relation WHERE topicId=? AND isDeleted=0', [id]);
+      if (topic.isDeleted === 0) {
+        const topicPred = new relationalStore.RdbPredicates('topic');
+        topicPred.equalTo('id', id);
+        await LocalRdbHelper.update('topic', {
+          'isDeleted': 1, 'updatedAt': this.nextWriteTime(topic.updatedAt), 'deviceId': this.localDeviceId,
+        }, topicPred);
+        await record('topic', id, topic.updatedAt, topic.deviceId);
+        changed = true;
+      }
+      for (const relation of relations) {
+        const relationPred = new relationalStore.RdbPredicates('topic_relation');
+        relationPred.equalTo('id', relation.id);
+        await LocalRdbHelper.update('topic_relation', {
+          'isDeleted': 1, 'updatedAt': this.nextWriteTime(relation.updatedAt), 'deviceId': this.localDeviceId,
+        }, relationPred);
+        await record('topic_relation', relation.id, relation.updatedAt, relation.deviceId);
+        changed = true;
+      }
+    });
+    if (changed) EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id, deleted: true });
   }
 
   async listTopics(): Promise<Topic[]> {
@@ -296,23 +329,25 @@ export class UserDataService {
       const relation = existing[0];
       const pred = new relationalStore.RdbPredicates('topic_relation');
       pred.equalTo('id', relation.id);
-      await LocalRdbHelper.update('topic_relation', {
-        'note': note ?? null, 'isDeleted': 0,
-        'updatedAt': this.nextWriteTime(relation.updatedAt), 'deviceId': this.localDeviceId,
-      }, pred);
-      await this.pushToDDS('topic_relation', relation.id, relation.updatedAt, relation.deviceId);
+      await this.commitChange('topic_relation', relation.id, async () => {
+        await LocalRdbHelper.update('topic_relation', {
+          'note': note ?? null, 'isDeleted': 0,
+          'updatedAt': this.nextWriteTime(relation.updatedAt), 'deviceId': this.localDeviceId,
+        }, pred);
+      }, relation.updatedAt, relation.deviceId);
       EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id: topicId });
       return;
     }
-    const id = DateUtil.uuid();
+    const id = LocalRdbHelper.topicRelationId(topicId, targetType, targetId);
     const now = this.nextWriteTime();
-    await LocalRdbHelper.insert('topic_relation', {
-      'id': id, 'topicId': topicId, 'targetType': targetType, 'targetId': targetId,
-      'note': note ?? null, 'orderIndex': 0, 'createdAt': now, 'updatedAt': now,
-      'isDeleted': 0,
-      'deviceId': this.localDeviceId,
+    await this.commitChange('topic_relation', id, async () => {
+      await LocalRdbHelper.insert('topic_relation', {
+        'id': id, 'topicId': topicId, 'targetType': targetType, 'targetId': targetId,
+        'note': note ?? null, 'orderIndex': 0, 'createdAt': now, 'updatedAt': now,
+        'isDeleted': 0,
+        'deviceId': this.localDeviceId,
+      });
     });
-    await this.pushToDDS('topic_relation', id);
     EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id: topicId });
   }
 
@@ -320,18 +355,21 @@ export class UserDataService {
     await this.ensureReady();
     const rows = await LocalRdbHelper.query<TopicRelation>(
       'SELECT topicId, updatedAt, deviceId FROM topic_relation WHERE id=? LIMIT 1', [id]);
+    if (rows.length === 0) return;
     const pred = new relationalStore.RdbPredicates('topic_relation');
     pred.equalTo('id', id);
-    await LocalRdbHelper.update('topic_relation', {
-      'isDeleted': 1, 'updatedAt': this.nextWriteTime(rows[0]?.updatedAt ?? 0), 'deviceId': this.localDeviceId,
-    }, pred);
-    await this.pushToDDS('topic_relation', id, rows[0]?.updatedAt, rows[0]?.deviceId);
-    if (rows.length > 0) EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id: rows[0].topicId });
+    await this.commitChange('topic_relation', id, async () => {
+      await LocalRdbHelper.update('topic_relation', {
+        'isDeleted': 1, 'updatedAt': this.nextWriteTime(rows[0]?.updatedAt ?? 0), 'deviceId': this.localDeviceId,
+      }, pred);
+    }, rows[0].updatedAt, rows[0].deviceId);
+    EventBus.getInstance().emit(AppEvents.TOPIC_CHANGED, { id: rows[0].topicId });
   }
 
   async listTopicRelations(topicId: string): Promise<TopicRelation[]> {
     return LocalRdbHelper.query<TopicRelation>(
-      `SELECT * FROM topic_relation WHERE topicId=? AND isDeleted=0 ORDER BY orderIndex, createdAt`, [topicId]
+      `SELECT r.* FROM topic_relation r INNER JOIN topic t ON t.id=r.topicId
+        WHERE r.topicId=? AND r.isDeleted=0 AND t.isDeleted=0 ORDER BY r.orderIndex, r.createdAt`, [topicId]
     );
   }
 
@@ -441,27 +479,24 @@ export class UserDataService {
     const pred = new relationalStore.RdbPredicates('favorite');
     pred.equalTo('targetType', targetType).and().equalTo('targetId', targetId).and().equalTo('isDeleted', 0);
     const list = await LocalRdbHelper.query<Favorite>(`SELECT id, updatedAt, deviceId FROM favorite WHERE targetType=? AND targetId=? AND isDeleted=0 LIMIT 1`, [targetType, targetId]);
-    await LocalRdbHelper.update('favorite', {
-      'tags': StringUtil.toTagsArray(tags),
-      'updatedAt': this.nextWriteTime(list[0]?.updatedAt ?? 0),
-      'deviceId': this.localDeviceId,
-    }, pred);
+    if (list.length === 0) return;
+    await this.commitChange('favorite', `${targetType}:${targetId}`, async () => {
+      await LocalRdbHelper.update('favorite', {
+        'tags': StringUtil.toTagsArray(tags),
+        'updatedAt': this.nextWriteTime(list[0]?.updatedAt ?? 0),
+        'deviceId': this.localDeviceId,
+      }, pred);
+    }, list[0].updatedAt, list[0].deviceId);
     // 更新缓存
     await this.reloadFavCache();
     EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType, targetId, tagsUpdated: true });
-    // 推送更新
-    if (list.length > 0) await this.pushToDDS('favorite', list[0].id, list[0].updatedAt, list[0].deviceId);
   }
 
-  private async pushToDDS(table: string, id: string, baseTime: number = 0,
-    baseDeviceId: string = ''): Promise<void> {
+  private async commitChange(table: 'favorite' | 'note' | 'topic' | 'topic_relation', id: string,
+    write: () => Promise<void>, baseTime: number = 0, baseDeviceId: string = ''): Promise<void> {
     const distributedModule = await import('./DistributedDataService');
-    const rows = await LocalRdbHelper.query<Record<string, Object>>(
-      `SELECT * FROM ${table} WHERE id=? LIMIT 1`, [id]);
-    if (rows.length > 0) {
-      await distributedModule.DistributedDataService.getInstance().pushChange(
-        table as 'favorite' | 'note' | 'topic' | 'topic_relation', id, rows[0], baseTime, baseDeviceId);
-    }
+    await distributedModule.DistributedDataService.getInstance().commitLocalChange(
+      table, id, write, baseTime, baseDeviceId);
   }
 
   private getContext() {

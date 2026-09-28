@@ -15,6 +15,7 @@ export struct SyncStatusBar {
 
   aboutToAppear(): void {
     EventBus.getInstance().on(AppEvents.SYNC_STATUS_CHANGED, this.onChange);
+    this.state = DistributedDataService.getInstance().getState();
     this.refresh(this.state);
   }
 
@@ -24,7 +25,7 @@ export struct SyncStatusBar {
 
   private onChange = (data?: Object | null): void => {
     if (!data) return;
-    const state = data as SyncState;
+    const state = DistributedDataService.getInstance().getState();
     this.state = state;
     this.refresh(state);
   };
@@ -70,7 +71,7 @@ export struct SyncStatusBar {
     if (this.state.status === SyncStatus.SYNCING) return '多端同步中…';
     if (this.state.status === SyncStatus.OFFLINE) return '离线模式：编辑将在联网后同步';
     if (this.state.status === SyncStatus.ERROR) return '同步异常，点击查看详情';
-    if (this.state.conflictCount > 0) return `有 ${this.state.conflictCount} 处同步冲突已自动处理`;
+    if (this.state.conflictCount > 0) return `有 ${this.state.conflictCount} 处同步冲突，点击查看`;
     return '';
   }
 }

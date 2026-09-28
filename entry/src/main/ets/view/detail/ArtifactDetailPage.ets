@@ -12,6 +12,7 @@ import { colors } from '../../common/constants/Colors';
 import { StringUtil } from '../../common/utils/StringUtil';
 import { DateUtil } from '../../common/utils/DateUtil';
 import { EventBus, AppEvents } from '../../common/utils/EventBus';
+import { Logger } from '../../common/utils/Logger';
 
 /**
  * 文物详情页
@@ -24,6 +25,7 @@ export struct ArtifactDetailPage {
   @State notes: Note[] = [];
   @State isFav: boolean = false;
   @State loading: boolean = true;
+  @State loadError: boolean = false;
   @State relatedSites: RecommendItem[] = [];
   @State favSheetName: string = '';
   private artifactEra(): EraMeta | undefined { return this.artifact ? EraMeta.getByCode(this.artifact.era) : undefined; }
@@ -54,8 +56,12 @@ export struct ArtifactDetailPage {
   }
 
   private async loadAll(): Promise<void> {
-    if (!this.artifact) return;
+    if (!this.artifact) {
+      this.loading = false;
+      return;
+    }
     this.loading = true;
+    this.loadError = false;
     try {
       const a = this.artifact;
       const cs = CultureService.getInstance();
@@ -63,9 +69,16 @@ export struct ArtifactDetailPage {
       if (a.siteId) this.site = cs.getSiteByIdSync(a.siteId);
       this.relatedSites = await RecommendationService.getInstance().getRelatedArtifacts(a, 4);
       this.isFav = us.isFavoritedSync(FavoriteTargetType.ARTIFACT, a.id);
-      await us.addHistory(FavoriteTargetType.ARTIFACT, a.id);
-      await cs.incrementView('artifact', a.id);
       await this.loadNotes();
+      try {
+        await us.addHistory(FavoriteTargetType.ARTIFACT, a.id);
+        await cs.incrementView('artifact', a.id);
+      } catch (e) {
+        Logger.warn('ArtifactDetailPage', `browse count update failed: ${e}`);
+      }
+    } catch (e) {
+      Logger.error('ArtifactDetailPage', `loadAll failed: ${e}`);
+      this.loadError = true;
     } finally {
       this.loading = false;
     }
@@ -147,6 +160,17 @@ export struct ArtifactDetailPage {
           Text('文卷未寻').fontSize(18).fontColor(colors.textTertiary)
           Text('返回').fontSize(13).fontColor(colors.gold).margin({ top: 16 }).onClick((): void => this.back())
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
+      } else if (this.loadError) {
+        Column({ space: 14 }) {
+          Text('文物内容加载失败').fontSize(18).fontColor(colors.textPrimary)
+          Text('请重试；若问题持续，请保留设备日志以便排查。')
+            .fontSize(12).fontColor(colors.textSecondary).textAlign(TextAlign.Center)
+          Button('重新加载').onClick((): void => { this.loadAll(); })
+          Text('返回').fontSize(13).fontColor(colors.gold)
+            .onClick((): void => this.back())
+        }
+        .width('100%').height('100%').padding(24)
+        .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
       } else {
         Scroll() {
           Column({ space: 0 }) {

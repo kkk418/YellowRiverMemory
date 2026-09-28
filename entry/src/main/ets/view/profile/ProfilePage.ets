@@ -2,7 +2,6 @@ import { colors } from '../../common/constants/Colors';
 import { UserDataService } from '../../service/UserDataService';
 import { PreferencesHelper } from '../../common/utils/PreferencesHelper';
 import { EventBus, AppEvents } from '../../common/utils/EventBus';
-import { DateUtil } from '../../common/utils/DateUtil';
 
 interface SectionHeaderProps {
   title: string;
@@ -112,7 +111,7 @@ export struct ProfilePage {
                   .fontSize(18).fontWeight(FontWeight.Medium).fontColor(colors.textPrimary)
                 Text(`YELLOW RIVER · EXPLORER`)
                   .fontSize(9).fontColor(colors.textTertiary).letterSpacing(2)
-                Text(`登录 ${this.historyCount > 0 ? DateUtil.formatRelative(Date.now() - 86400000) : '今日'}开始探索`)
+                Text(`已浏览 ${this.historyCount} 项文化内容`)
                   .fontSize(11).fontColor(colors.textSecondary).margin({ top: 4 })
               }
               .alignItems(HorizontalAlign.Start)

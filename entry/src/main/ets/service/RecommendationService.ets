@@ -47,10 +47,10 @@ export class RecommendationService {
       const allSites = culture.listSitesSync();
       const allArtifacts = culture.listArtifactsSync();
 
-      // 用户画像：从收藏和笔记提取偏好
+      // 用户画像：从收藏和实际浏览历史提取偏好
       const favSites = (await user.listFavorites(FavoriteTargetType.SITE)).map(f => f.targetId);
       const favArtifacts = (await user.listFavorites(FavoriteTargetType.ARTIFACT)).map(f => f.targetId);
-      const history = await user.getRecentBrowsed(50);
+      const history = await user.listHistory(50);
 
       // 偏好维度统计
       const eraCount = new Map<string, number>();

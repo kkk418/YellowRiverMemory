@@ -25,7 +25,7 @@
 
 ### 4. 分布式数据同步（比赛核心）
 - 基于 `@kit.ArkData.distributedKVStore` 与可信设备发现能力实现同步
-- **LWW（Last-Writer-Wins）**：按更新时间、设备标识确定胜出版本
+- **LWW（Last-Writer-Wins）**：按更新时间、设备标识确定胜出版本；设备时钟偏差仍可能影响并发编辑的胜出结果
 - 离线变更先写入本地数据库和持久化待同步队列；前台或手动同步时重试
 - 全局顶部SyncStatusBar实时展示同步状态
 - 同步面板：设备连线动效+金色粒子流动+设备列表+进度+冲突数+冲突Sheet
@@ -58,7 +58,7 @@
 ├─────────────────────────────────────────────────┤
 │  数据层                                           │
 │  LocalRdbHelper   RDB关系型数据库（含迁移与待同步队列）│
-│  AssetRepository  Rawfile预置JSON首次导入          │
+│  AssetRepository  Rawfile预置JSON按ID增量校准     │
 │  PreferencesHelper KV偏好存储                     │
 │  MemoryCache      启动预热零延迟访问               │
 └─────────────────────────────────────────────────┘
@@ -117,7 +117,7 @@ PreferencesHelper.init(ctx)
    ↓
 LocalRdbHelper.init(ctx)              # RDB建表（12表，含迁移与同步队列）
    ↓
-AssetRepository.initIfNeeded(resMgr)  # 首次启动导入rawfile预置数据
+AssetRepository.initIfNeeded(resMgr)  # 按ID补齐rawfile预置数据
    ↓
 CultureService.warmCache()            # 预热内存Map
    ↓
@@ -172,14 +172,14 @@ emit DATA_INIT_COMPLETED
 | 阶段四·分布式同步 | 实现待真机验证 | 可信设备发现、加密 KV、持久化队列和冲突记录已接入；未宣称双机验收完成 |
 | 阶段五·拓展功能 | 暂不作为本轮验收项 | 推荐、主题图谱和备份恢复仍需单独验证 |
 
-编译、升级和双设备时延的实测结果记录在 `../docs/10-核心闭环验收记录.md`；完成前不将分布式同步标记为已验收。
+编译、升级和双设备时延的实测结果记录在 [核心闭环验收记录](docs/10-核心闭环验收记录.md)；完成前不将分布式同步标记为已验收。
 
 ## ⚠️ 注意事项
 
 - 图片资源使用**朝代色渐变色块+名称水印**作为占位，无真实图片依赖；实际部署时将图片放入 `resources/base/media/` 并替换Image路径即可
 - 分布式功能需在**两台已组网的真机**上验证；本仓库不包含真机验收结果
 - 所有Service均为单例，CRUD后自动emit EventBus事件驱动UI刷新，内存缓存保证零延迟访问
-- 预置数据在首次启动时一次性导入RDB，后续启动直接读库，完全支持离线浏览
+- 预置数据按 ID 检查并补齐 RDB 中的缺失条目，文化浏览仍从本地数据库读取
 
 ---
 **一条河，五千年，文明不息。**

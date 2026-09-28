@@ -102,7 +102,7 @@ struct Index {
         }
         .hideTitleBar(true).hideToolBar(true)
         .navDestination(this.destinationBuilder)
-        .mode(NavigationMode.Stack)
+        .mode(NavigationMode.Auto)
         .layoutWeight(1)
         .backgroundColor(colors.bg)
       }

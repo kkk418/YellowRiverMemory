@@ -12,6 +12,7 @@ import { colors } from '../../common/constants/Colors';
 import { StringUtil } from '../../common/utils/StringUtil';
 import { DateUtil } from '../../common/utils/DateUtil';
 import { EventBus, AppEvents } from '../../common/utils/EventBus';
+import { Logger } from '../../common/utils/Logger';
 
 /**
  * 遗址详情页（数字敦煌洞窟详情风格）
@@ -26,6 +27,7 @@ export struct SiteDetailPage {
   @State notes: Note[] = [];
   @State isFav: boolean = false;
   @State loading: boolean = true;
+  @State loadError: boolean = false;
   @State discoveries: DiscoveryItem[] = [];
   @State events: HistoricalEventItem[] = [];
   @State favSheetName: string = '';
@@ -62,8 +64,12 @@ export struct SiteDetailPage {
   }
 
   private async loadAll(): Promise<void> {
-    if (!this.site) return;
+    if (!this.site) {
+      this.loading = false;
+      return;
+    }
     this.loading = true;
+    this.loadError = false;
     try {
       const s = this.site;
       const cs = CultureService.getInstance();
@@ -79,9 +85,16 @@ export struct SiteDetailPage {
       this.discoveries = cs.parseDiscoveries(s);
       this.events = cs.parseHistoricalEvents(s);
       this.isFav = us.isFavoritedSync(FavoriteTargetType.SITE, s.id);
-      await us.addHistory(FavoriteTargetType.SITE, s.id);
-      await cs.incrementView('site', s.id);
       await this.loadNotes();
+      try {
+        await us.addHistory(FavoriteTargetType.SITE, s.id);
+        await cs.incrementView('site', s.id);
+      } catch (e) {
+        Logger.warn('SiteDetailPage', `browse count update failed: ${e}`);
+      }
+    } catch (e) {
+      Logger.error('SiteDetailPage', `loadAll failed: ${e}`);
+      this.loadError = true;
     } finally {
       this.loading = false;
     }
@@ -174,6 +187,17 @@ export struct SiteDetailPage {
           Text('返回').fontSize(13).fontColor(colors.gold).margin({ top: 16 })
             .onClick((): void => this.back())
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
+      } else if (this.loadError) {
+        Column({ space: 14 }) {
+          Text('遗址内容加载失败').fontSize(18).fontColor(colors.textPrimary)
+          Text('请重试；若问题持续，请保留设备日志以便排查。')
+            .fontSize(12).fontColor(colors.textSecondary).textAlign(TextAlign.Center)
+          Button('重新加载').onClick((): void => { this.loadAll(); })
+          Text('返回').fontSize(13).fontColor(colors.gold)
+            .onClick((): void => this.back())
+        }
+        .width('100%').height('100%').padding(24)
+        .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
       } else {
         Scroll() {
           Column({ space: 0 }) {
@@ -388,6 +412,8 @@ export struct SiteDetailPage {
                 Text(this.site!.travelInfo).fontSize(12).fontColor(colors.textSecondary).lineHeight(22)
                   .width('100%').padding(16).backgroundColor(colors.gold10).borderRadius(2)
                   .border({ width: 0.5, color: colors.goldDim })
+                Text('开放时间和票价可能变化，出行前请以场馆官方信息为准。')
+                  .fontSize(10).fontColor(colors.textTertiary)
               }
               .width('100%').padding({ left: 24, right: 24, bottom: 24 })
               .alignItems(HorizontalAlign.Start)

@@ -18,6 +18,7 @@ export struct SyncPage {
 
   aboutToAppear(): void {
     EventBus.getInstance().on(AppEvents.SYNC_STATUS_CHANGED, this.onSyncChange);
+    this.state = DistributedDataService.getInstance().getState();
     this.timer = setInterval(() => {
       this.nowTick = Date.now();
     }, 1000);
@@ -29,7 +30,7 @@ export struct SyncPage {
   }
 
   private onSyncChange = (data?: Object | null): void => {
-    if (data) this.state = data as SyncState;
+    if (data) this.state = DistributedDataService.getInstance().getState();
   };
 
   private async manualSync(): Promise<void> {

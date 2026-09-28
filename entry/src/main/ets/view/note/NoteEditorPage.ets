@@ -31,21 +31,32 @@ export struct NoteEditorPage {
   @State showTagSheet: boolean = false;
   @State newTagInput: string = '';
   @State saving: boolean = false;
+  @State loadingNote: boolean = true;
+  @State errorMessage: string = '';
   private isTagActive(t: TagMeta): boolean { return this.tags.includes(t.code) || this.tags.includes(t.label); }
 
   aboutToAppear(): void {
+    this.loadingNote = true;
     setTimeout(async () => {
+      this.errorMessage = '';
       if (this.params.noteId) {
         this.isEditMode = true;
-        const notes = await UserDataService.getInstance().listNotes();
-        const n = notes.find(x => x.id === this.params.noteId);
-        if (n) {
+        try {
+          const n = await UserDataService.getInstance().getNoteById(this.params.noteId);
+          if (!n || n.isDeleted !== 0) {
+            this.existingNote = null;
+            this.errorMessage = '这条笔记已不存在或已在其他设备删除，请返回笔记列表。';
+            this.loadingNote = false;
+            return;
+          }
           this.existingNote = n;
           this.title = n.title;
           this.content = n.content;
           this.tags = StringUtil.parseTagsArray(n.tags);
           this.targetType = n.targetType;
           if (n.targetId) this.targetName = this.resolveTargetName(n.targetType, n.targetId);
+        } catch (_) {
+          this.errorMessage = '笔记加载失败，请返回后重试。';
         }
       } else {
         this.isEditMode = false;
@@ -59,6 +70,7 @@ export struct NoteEditorPage {
           this.targetName = this.resolveTargetName(this.targetType, this.params.targetId);
         }
       }
+      this.loadingNote = false;
     }, 30);
   }
 
@@ -75,9 +87,18 @@ export struct NoteEditorPage {
   }
 
   private async doSave(): Promise<void> {
+    if (this.saving || this.loadingNote) return;
+    this.errorMessage = '';
+    if (this.isEditMode && !this.existingNote) {
+      this.errorMessage = '无法保存：原笔记已不存在，请返回笔记列表。';
+      return;
+    }
     if (!this.title.trim() && !this.content.trim()) {
-      // 空笔记直接返回
-      this.navPathStack.pop();
+      if (this.isEditMode) {
+        this.errorMessage = '标题和正文不能同时为空。';
+      } else {
+        this.navPathStack.pop();
+      }
       return;
     }
     this.saving = true;
@@ -85,7 +106,7 @@ export struct NoteEditorPage {
       const svc = UserDataService.getInstance();
       if (this.isEditMode && this.existingNote) {
         await svc.updateNote(this.existingNote.id, this.title.trim() || '无题',
-          this.content, this.tags);
+          this.content, this.tags, this.existingNote.updatedAt, this.existingNote.deviceId);
       } else {
         await svc.addNote(this.title.trim() || '无题', this.content,
           this.targetType, this.params.targetId, this.tags);
@@ -94,15 +115,28 @@ export struct NoteEditorPage {
       this.saving = false;
       this.navPathStack.pop();
     } catch (e) {
+      this.errorMessage = String(e).includes('笔记已在其他设备修改或删除') ?
+        '笔记已在其他设备修改或删除，当前编辑内容未保存。请返回后重新打开笔记。' :
+        '保存失败，请稍后重试。';
+    } finally {
       this.saving = false;
     }
   }
 
   private async doDelete(): Promise<void> {
-    if (!this.isEditMode || !this.existingNote) return;
-    await UserDataService.getInstance().deleteNote(this.existingNote.id);
-    EventBus.getInstance().emit(AppEvents.NOTE_CHANGED, {});
-    this.navPathStack.pop();
+    if (this.saving || this.loadingNote || !this.isEditMode || !this.existingNote) return;
+    this.saving = true;
+    this.errorMessage = '';
+    try {
+      await UserDataService.getInstance().deleteNote(this.existingNote.id,
+        this.existingNote.updatedAt, this.existingNote.deviceId);
+      EventBus.getInstance().emit(AppEvents.NOTE_CHANGED, {});
+      this.navPathStack.pop();
+    } catch (e) {
+      this.errorMessage = '删除失败，请稍后重试。';
+    } finally {
+      this.saving = false;
+    }
   }
 
   @Builder BackButton() {
@@ -138,15 +172,22 @@ export struct NoteEditorPage {
           .fontSize(16).fontWeight(FontWeight.Medium).fontColor(colors.textPrimary)
           .layoutWeight(1).textAlign(TextAlign.Center)
         Row({ space: 16 }) {
-          if (this.isEditMode) {
+          if (this.isEditMode && this.existingNote) {
             Text('删除').fontSize(13).fontColor(colors.cinnabar).onClick((): void => { this.doDelete(); })
           }
-          Text('保存').fontSize(14).fontColor(colors.gold).fontWeight(FontWeight.Medium)
+          Text(this.loadingNote ? '加载中…' : this.saving ? '处理中…' : '保存').fontSize(14)
+            .fontColor(this.saving || this.loadingNote ? colors.textTertiary : colors.gold)
+            .fontWeight(FontWeight.Medium)
             .onClick((): void => { this.doSave(); })
         }
       }
       .width('100%').height(56).padding({ left: 8, right: 16 })
       .backgroundColor(colors.bgCard)
+
+      if (this.errorMessage) {
+        Text(this.errorMessage).fontSize(12).fontColor(colors.cinnabar)
+          .width('100%').padding({ left: 20, right: 20, top: 8, bottom: 8 })
+      }
 
       Scroll() {
         Column({ space: 16 }) {

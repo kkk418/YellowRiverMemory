@@ -51,10 +51,10 @@ export class BackupService {
    */
   async exportBackup(): Promise<BackupResult> {
     try {
-      const favorites = await LocalRdbHelper.query<Favorite>('SELECT * FROM favorite', []);
+      const favorites = await LocalRdbHelper.query<Favorite>('SELECT * FROM favorite WHERE isDeleted=0', []);
       const notes = await LocalRdbHelper.query<Note>('SELECT * FROM note WHERE isDeleted=0', []);
       const topics = await LocalRdbHelper.query<Topic>('SELECT * FROM topic WHERE isDeleted=0', []);
-      const relations = await LocalRdbHelper.query<TopicRelation>('SELECT * FROM topic_relation', []);
+      const relations = await LocalRdbHelper.query<TopicRelation>('SELECT * FROM topic_relation WHERE isDeleted=0', []);
 
       // 偏好设置
       const prefs = await PreferencesHelper.getAll();
@@ -82,6 +82,7 @@ export class BackupService {
       const fileName = `yellow_river_backup_${y}${m}${d}_${hh}${mm}${ss}.json`;
       // 写入沙箱文件
       const ctx = PreferencesHelper.getContext();
+      let writeError = '应用文件目录不可用';
       if (ctx) {
         try {
           const filesDir = ctx.filesDir;
@@ -98,14 +99,13 @@ export class BackupService {
             stats: { favorites: favorites.length, notes: notes.length, topics: topics.length },
           };
         } catch (fsErr) {
-          // 文件系统API不可用时，返回数据本身（可由用户保存）
-          Logger.warn(TAG, `fs write failed, fallback to in-memory: ${fsErr}`);
+          writeError = String(fsErr);
+          Logger.warn(TAG, `fs write failed: ${fsErr}`);
         }
       }
       return {
-        success: true,
-        message: `数据已整理：${favorites.length} 收藏 · ${notes.length} 笔记 · ${topics.length} 主题（可在多设备登录同账号自动同步）`,
-        stats: { favorites: favorites.length, notes: notes.length, topics: topics.length },
+        success: false,
+        message: `备份文件未保存：${writeError}`,
       };
     } catch (e) {
       Logger.error(TAG, `exportBackup failed: ${e}`);
@@ -121,7 +121,7 @@ export class BackupService {
       await DistributedDataService.getInstance().requestSync();
       return {
         success: true,
-        message: '已触发多设备同步：请确保旧设备在线并打开过本应用，数据将自动同步至本机'
+        message: '已请求可信设备同步；此操作不导入备份文件，请在同步页确认结果'
       };
     } catch (e) {
       return { success: false, message: `同步触发失败：${e}` };

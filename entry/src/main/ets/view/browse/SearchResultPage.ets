@@ -21,32 +21,69 @@ export struct SearchResultPage {
   @State activeTab: number = 0; // 0=全部 1=遗址 2=文物 3=诗词
   @State loading: boolean = false;
   @State searched: boolean = false;
+  @State searchedKeyword: string = '';
+  @State searchError: string = '';
   @State history: string[] = [];
   @State hotKeywords: string[] = ['仰韶文化', '殷墟', '龙门石窟', '二里头', '开封', '唐三彩', '汝窑', '甲骨文'];
+  private searchRequest: number = 0;
 
   async aboutToAppear(): Promise<void> {
     this.keyword = this.initialKeyword;
-    this.history = await UserDataService.getInstance().getSearchHistory();
+    try {
+      this.history = await UserDataService.getInstance().getSearchHistory();
+    } catch (_) {
+      this.history = [];
+    }
     if (this.keyword) {
       await this.doSearch();
     }
   }
 
+  aboutToDisappear(): void {
+    this.searchRequest++;
+  }
+
   async doSearch(kw?: string): Promise<void> {
     if (kw !== undefined) this.keyword = kw;
     const q = this.keyword.trim();
-    if (!q) { this.searched = false; return; }
+    const request = ++this.searchRequest;
+    if (!q) {
+      this.searched = false;
+      this.loading = false;
+      this.searchError = '';
+      this.sites = [];
+      this.artifacts = [];
+      this.poetries = [];
+      return;
+    }
     this.loading = true;
     this.searched = true;
+    this.searchedKeyword = q;
+    this.searchError = '';
+    this.activeTab = 0;
     try {
-      const us = UserDataService.getInstance();
-      await us.addSearchHistory(q);
-      this.history = await us.getSearchHistory();
       const result = await CultureService.getInstance().searchAll(q, 30);
+      if (request !== this.searchRequest) return;
       this.sites = result.sites;
       this.artifacts = result.artifacts;
       this.poetries = result.poetries;
-    } finally { this.loading = false; }
+      try {
+        const us = UserDataService.getInstance();
+        await us.addSearchHistory(q);
+        if (request === this.searchRequest) this.history = await us.getSearchHistory();
+      } catch (_) {
+        // Search results remain usable if recording local search history fails.
+      }
+    } catch (_) {
+      if (request === this.searchRequest) {
+        this.searchError = '搜索失败，请重试。';
+        this.sites = [];
+        this.artifacts = [];
+        this.poetries = [];
+      }
+    } finally {
+      if (request === this.searchRequest) this.loading = false;
+    }
   }
 
   async clearHistory(): Promise<void> {
@@ -78,7 +115,16 @@ export struct SearchResultPage {
             .height(36)
           if (this.keyword) {
             Text('✕').fontSize(14).fontColor(colors.textTertiary).padding(4)
-              .onClick((): void => { this.keyword = ''; this.searched = false; this.sites = []; this.artifacts = []; this.poetries = []; })
+              .onClick((): void => {
+                this.searchRequest++;
+                this.keyword = '';
+                this.searched = false;
+                this.loading = false;
+                this.searchError = '';
+                this.sites = [];
+                this.artifacts = [];
+                this.poetries = [];
+              })
           }
         }
         .layoutWeight(1).height(36).padding({ left: 12, right: 12 })
@@ -162,7 +208,7 @@ export struct SearchResultPage {
         // 有搜索结果
         Column({ space: 0 }) {
           Row({ space: 12 }) {
-            Text(`"${this.keyword}"`).fontSize(13).fontColor(colors.gold)
+            Text(`"${this.searchedKeyword}"`).fontSize(13).fontColor(colors.gold)
             Text(`共 ${this.sites.length + this.artifacts.length + this.poetries.length} 条`)
               .fontSize(11).fontColor(colors.textTertiary)
           }
@@ -177,9 +223,16 @@ export struct SearchResultPage {
           .width('100%').padding({ left: 20, right: 20, bottom: 4 })
           Divider().color(colors.border).strokeWidth(0.5).width('100%')
 
-          if (this.sites.length + this.artifacts.length + this.poetries.length === 0) {
+          if (this.searchError) {
+            Column({ space: 12 }) {
+              Text(this.searchError).fontSize(13).fontColor(colors.textSecondary)
+              Button('重新搜索').onClick((): void => { this.doSearch(this.searchedKeyword); })
+            }
+            .layoutWeight(1).justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+          } else if (this.sites.length + this.artifacts.length + this.poetries.length === 0) {
             Column().layoutWeight(1).justifyContent(FlexAlign.Center) {
-              EmptyState({ icon: '卷', title: '查无此卷', subtitle: `未找到与"${this.keyword}"相关的内容` })
+              EmptyState({ icon: '卷', title: '查无此卷', subtitle: `未找到与"${this.searchedKeyword}"相关的内容` })
             }
           } else {
             Scroll() {

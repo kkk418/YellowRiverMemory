@@ -2,6 +2,7 @@
  * 轻量级事件总线（发布-订阅），模块间解耦通信
  */
 import { SyncStatus } from '../constants/Enums';
+import { Logger } from './Logger';
 
 export interface EventPayload {
   id?: string;
@@ -65,7 +66,7 @@ export class EventBus {
       try {
         entry.handler(data);
       } catch (e) {
-        // 避免订阅者异常影响其他
+        Logger.error('EventBus', `listener failed for ${event}: ${e}`);
       }
       if (entry.once) {
         const idx = list.indexOf(entry);
@@ -97,7 +98,6 @@ export class AppEvents {
   static SYNC_CONFLICT_DETECTED = 'sync_conflict';
   static THEME_CHANGED = 'theme_changed';
   static DATA_INIT_COMPLETED = 'data_init_completed';
-  static BROWSE_HISTORY_ADDED = 'browse_history_added';
   static APP_FOREGROUND = 'app_foreground';
   static APP_BACKGROUND = 'app_background';
 }

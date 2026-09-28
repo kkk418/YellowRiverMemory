@@ -2,6 +2,7 @@
  * 预置资源仓库：负责从 rawfile 读取 JSON 数据，并在首次启动时导入 RDB
  */
 import { resourceManager } from '@kit.LocalizationKit';
+import { relationalStore } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
 import { Context } from '@kit.AbilityKit';
 import { Logger } from '../common/utils/Logger';
@@ -19,6 +20,8 @@ interface PresetData {
   poetries: Poetry[];
 }
 
+interface IdRow { id: string; }
+
 export class AssetRepository {
   private static initialized = false;
 
@@ -29,28 +32,17 @@ export class AssetRepository {
   static async initIfNeeded(resMgr: resourceManager.ResourceManager): Promise<void> {
     if (AssetRepository.initialized) return;
     const currentVersion = AppConstants.PRESET_VERSION;
-    const installedVersion = await PreferencesHelper.getDataVersion();
-    if (installedVersion >= currentVersion) {
-      Logger.info(TAG, `Preset data already loaded (v${installedVersion}), skip.`);
-      AssetRepository.initialized = true;
-      return;
-    }
     try {
+      const savedVersion = await PreferencesHelper.getDataVersion();
       const text = await AssetRepository.readRawText(resMgr, 'data/preset.json');
       const data: PresetData = JSON.parse(text) as PresetData;
-      const existing = await LocalRdbHelper.count('site');
-      if (existing > 0) {
-        // Keep user data and existing primary keys while filling fields added in schema v2.
-        await AssetRepository.backfillExistingRows(data);
-        await PreferencesHelper.setDataVersion(currentVersion);
-        AssetRepository.initialized = true;
-        Logger.info(TAG, `Existing cultural data found (${existing} sites); preset fields backfilled.`);
-        return;
-      }
-      await AssetRepository.importToRdb(data);
-      await PreferencesHelper.setDataVersion(currentVersion);
+      // Import by ID on every process start so an interrupted or partial install
+      // is repaired even when the preference version was already advanced.
+      // Refresh bundled content only after a preset upgrade; user data lives in separate tables.
+      await AssetRepository.importToRdb(data, savedVersion < currentVersion);
+      if (savedVersion < currentVersion) await PreferencesHelper.setDataVersion(currentVersion);
       AssetRepository.initialized = true;
-      Logger.info(TAG, `Preset data imported: sites=${data.sites.length}, artifacts=${data.artifacts.length}, poetries=${data.poetries.length}`);
+      Logger.info(TAG, `Preset data checked: sites=${data.sites.length}, artifacts=${data.artifacts.length}, poetries=${data.poetries.length}`);
     } catch (e) {
       Logger.error(TAG, `Preset import failed: ${e}`);
       throw new Error(String(e));
@@ -79,29 +71,21 @@ export class AssetRepository {
     return artifact.isNationalTreasure ?? (artifact.level?.startsWith('国宝级') ? 1 : 0);
   }
 
-  private static async backfillExistingRows(data: PresetData): Promise<void> {
-    await LocalRdbHelper.runInTransaction(async () => {
-      for (const artifact of data.artifacts) {
-        await LocalRdbHelper.execute(
-          'UPDATE artifact SET isNationalTreasure=? WHERE id=?',
-          [AssetRepository.nationalTreasureFlag(artifact), artifact.id]);
-      }
-      const importedAt = DateUtil.now();
-      for (const poetry of data.poetries) {
-        await LocalRdbHelper.execute(
-          'UPDATE poetry SET createdAt=? WHERE id=? AND (createdAt IS NULL OR createdAt=0)',
-          [poetry.createdAt ?? importedAt, poetry.id]);
-      }
-    });
+  private static async updateContent(table: 'site' | 'artifact' | 'poetry', id: string,
+    values: relationalStore.ValuesBucket): Promise<void> {
+    const predicates = new relationalStore.RdbPredicates(table);
+    predicates.equalTo('id', id);
+    await LocalRdbHelper.update(table, values, predicates);
   }
 
-  private static async importToRdb(data: PresetData): Promise<void> {
+  private static async importToRdb(data: PresetData, refreshExisting: boolean): Promise<void> {
     await LocalRdbHelper.runInTransaction(async () => {
+      const siteIds = new Set((await LocalRdbHelper.query<IdRow>('SELECT id FROM site')).map(row => row.id));
+      const artifactIds = new Set((await LocalRdbHelper.query<IdRow>('SELECT id FROM artifact')).map(row => row.id));
+      const poetryIds = new Set((await LocalRdbHelper.query<IdRow>('SELECT id FROM poetry')).map(row => row.id));
       for (const site of data.sites) {
-        if (!site.createdAt) site.createdAt = DateUtil.now();
-        if (!site.updatedAt) site.updatedAt = site.createdAt;
-        await LocalRdbHelper.insert('site', {
-          'id': site.id,
+        const now = DateUtil.now();
+        const content: relationalStore.ValuesBucket = {
           'name': site.name,
           'nameEn': site.nameEn ?? null,
           'era': site.era,
@@ -119,17 +103,21 @@ export class AssetRepository {
           'travelInfo': site.travelInfo ?? null,
           'highlight': site.highlight ?? null,
           'artifactCount': site.artifactCount ?? 0,
-          'viewCount': 0,
           'isFeatured': site.isFeatured ?? 0,
-          'createdAt': site.createdAt,
-          'updatedAt': site.updatedAt,
-        });
+          'updatedAt': site.updatedAt ?? now,
+        };
+        if (siteIds.has(site.id)) {
+          if (refreshExisting) await AssetRepository.updateContent('site', site.id, content);
+          continue;
+        }
+        content.id = site.id;
+        content.viewCount = 0;
+        content.createdAt = site.createdAt ?? now;
+        await LocalRdbHelper.insert('site', content);
       }
       for (const a of data.artifacts) {
-        if (!a.createdAt) a.createdAt = DateUtil.now();
-        if (!a.updatedAt) a.updatedAt = a.createdAt;
-        await LocalRdbHelper.insert('artifact', {
-          'id': a.id,
+        const now = DateUtil.now();
+        const content: relationalStore.ValuesBucket = {
           'name': a.name,
           'nameEn': a.nameEn ?? null,
           'era': a.era,
@@ -142,16 +130,21 @@ export class AssetRepository {
           'size': a.size ?? null,
           'location': a.location ?? null,
           'level': a.level ?? null,
-          'viewCount': 0,
           'isFeatured': a.isFeatured ?? 0,
           'isNationalTreasure': AssetRepository.nationalTreasureFlag(a),
-          'createdAt': a.createdAt,
-          'updatedAt': a.updatedAt,
-        });
+          'updatedAt': a.updatedAt ?? now,
+        };
+        if (artifactIds.has(a.id)) {
+          if (refreshExisting) await AssetRepository.updateContent('artifact', a.id, content);
+          continue;
+        }
+        content.id = a.id;
+        content.viewCount = 0;
+        content.createdAt = a.createdAt ?? now;
+        await LocalRdbHelper.insert('artifact', content);
       }
       for (const p of data.poetries) {
-        await LocalRdbHelper.insert('poetry', {
-          'id': p.id,
+        const content: relationalStore.ValuesBucket = {
           'title': p.title,
           'author': p.author ?? null,
           'dynasty': p.dynasty ?? null,
@@ -159,8 +152,17 @@ export class AssetRepository {
           'translation': p.translation ?? null,
           'relatedSiteId': p.relatedSiteId ?? null,
           'relatedCity': p.relatedCity ?? null,
-          'createdAt': DateUtil.now(),
-        });
+        };
+        if (poetryIds.has(p.id)) {
+          if (refreshExisting) await AssetRepository.updateContent('poetry', p.id, content);
+          await LocalRdbHelper.execute(
+            'UPDATE poetry SET createdAt=? WHERE id=? AND (createdAt IS NULL OR createdAt=0)',
+            [p.createdAt ?? DateUtil.now(), p.id]);
+          continue;
+        }
+        content.id = p.id;
+        content.createdAt = p.createdAt ?? DateUtil.now();
+        await LocalRdbHelper.insert('poetry', content);
       }
     });
   }

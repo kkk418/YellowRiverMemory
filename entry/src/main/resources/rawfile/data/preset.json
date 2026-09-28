@@ -81,7 +81,7 @@
       "historicalEvents": "- 约公元前1300年：盘庚迁殷\n- 公元前1046年：武王伐纣，商亡，殷都沦为废墟\n- 1899年：王懿荣发现甲骨文\n- 1928年：首次科学发掘，中国考古学重要起点\n- 1961年：第一批全国重点文物保护单位\n- 2006年：列入《世界文化遗产名录》",
       "travelInfo": "📍 地址：河南省安阳市殷都区殷墟路1号\n⏰ 开放时间：8:30-17:00\n🎫 门票：70元（宫殿宗庙遗址+王陵遗址）\n🚗 交通：安阳火车站下车乘公交5路/18路直达",
       "highlight": "世界文化遗产·甲骨文",
-      "artifactCount": 7,
+      "artifactCount": 6,
       "isFeatured": 1
     },
     {
@@ -503,8 +503,8 @@
       "nameEn": "Four-ram Square Zun",
       "era": "xiashang",
       "type": "bronze",
-      "siteId": "site_yinxu",
-      "city": "anyang",
+      "siteId": null,
+      "city": null,
       "coverImage": "images/artifacts/siyangfangzun.jpg",
       "description": "商代晚期青铜方尊，传1938年湖南宁乡出土（为殷商文化圈）。器呈方形，四角各铸一卷角大羊，羊首伸出器外，羊身与器腹融合，造型雄奇，工艺精湛，是商代青铜艺术的极品之作。虽非殷墟本地出土，但属于典型商代晚期风格，代表商代青铜铸造的巅峰水平。",
       "material": "青铜",

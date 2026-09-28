@@ -72,7 +72,11 @@ export class CultureService {
       this.cacheWarmed = true;
       Logger.info(TAG, `Culture cache warmed: sites=${sites.length}, artifacts=${artifacts.length}`);
     } catch (e) {
+      this.cacheWarmed = false;
+      this.siteMap.clear();
+      this.artifactMap.clear();
       Logger.error(TAG, `warmCache failed: ${e}`);
+      throw new Error(String(e));
     }
   }
 
@@ -238,25 +242,10 @@ export class CultureService {
     const conditions: string[] = [];
     const args: (string | number)[] = [];
     if (criteria.keyword && criteria.keyword.length > 0) {
-      // 对中文做bigram拆分（每2个字组合），提升模糊搜索命中率
-      const kw = criteria.keyword.trim();
-      const tokens: string[] = [];
-      tokens.push(`%${kw}%`);
-      for (let i = 0; i < kw.length - 1; i++) {
-        const bi = kw.substring(i, i + 2);
-        if (bi.length === 2) tokens.push(`%${bi}%`);
-      }
-      const ors: string[] = [];
-      // 名称
-      tokens.forEach(t => ors.push('name LIKE ?'));
-      tokens.forEach(t => ors.push('summary LIKE ?'));
-      tokens.forEach(t => ors.push('nameEn LIKE ?'));
-      // 去重占位参数
-      const allArgs: (string | number)[] = [];
-      const cols = ['name', 'summary', 'nameEn'];
-      cols.forEach(() => tokens.forEach(t => allArgs.push(t)));
-      conditions.push(`(${ors.join(' OR ')})`);
-      args.push(...allArgs);
+      const kw = `%${this.escapeLike(criteria.keyword.trim())}%`;
+      conditions.push(`(name LIKE ? ESCAPE '!' OR summary LIKE ? ESCAPE '!'
+        OR nameEn LIKE ? ESCAPE '!')`);
+      args.push(kw, kw, kw);
     }
     if (criteria.era && criteria.era.length > 0) {
       conditions.push(`era IN (${criteria.era.map(() => '?').join(',')})`);
@@ -269,6 +258,9 @@ export class CultureService {
     if (criteria.city && criteria.city.length > 0) {
       conditions.push(`city IN (${criteria.city.map(() => '?').join(',')})`);
       args.push(...criteria.city);
+    }
+    if (criteria.isFeaturedOnly) {
+      conditions.push('isFeatured=1');
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const countSql = `SELECT COUNT(*) as c FROM site ${where}`;
@@ -286,17 +278,25 @@ export class CultureService {
     const conditions: string[] = [];
     const args: (string | number)[] = [];
     if (criteria.keyword && criteria.keyword.length > 0) {
-      const kw = criteria.keyword.trim();
-      conditions.push(`((name LIKE ? OR description LIKE ? OR material LIKE ? OR location LIKE ?))`);
+      const kw = this.escapeLike(criteria.keyword.trim());
+      conditions.push(`((name LIKE ? ESCAPE '!' OR description LIKE ? ESCAPE '!'
+        OR material LIKE ? ESCAPE '!' OR location LIKE ? ESCAPE '!'))`);
       args.push(`%${kw}%`, `%${kw}%`, `%${kw}%`, `%${kw}%`);
     }
     if (criteria.era && criteria.era.length > 0) {
       conditions.push(`era IN (${criteria.era.map(() => '?').join(',')})`);
       args.push(...criteria.era);
     }
+    if (criteria.artifactType && criteria.artifactType.length > 0) {
+      conditions.push(`type IN (${criteria.artifactType.map(() => '?').join(',')})`);
+      args.push(...criteria.artifactType);
+    }
     if (criteria.city && criteria.city.length > 0) {
       conditions.push(`city IN (${criteria.city.map(() => '?').join(',')})`);
       args.push(...criteria.city);
+    }
+    if (criteria.isFeaturedOnly) {
+      conditions.push('isFeatured=1');
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const countSql = `SELECT COUNT(*) as c FROM artifact ${where}`;
@@ -351,20 +351,28 @@ export class CultureService {
 
   /** 综合搜索（遗址+文物） */
   async searchAll(keyword: string, limit: number = 20): Promise<CultureSearchResult> {
-    const kw = `%${keyword}%`;
+    const kw = `%${this.escapeLike(keyword.trim())}%`;
     const sites = await LocalRdbHelper.query<Site>(
-      `SELECT * FROM site WHERE name LIKE ? OR summary LIKE ? OR nameEn LIKE ? LIMIT ?`,
+      `SELECT * FROM site WHERE name LIKE ? ESCAPE '!' OR summary LIKE ? ESCAPE '!'
+        OR nameEn LIKE ? ESCAPE '!' ORDER BY isFeatured DESC, name LIMIT ?`,
       [kw, kw, kw, limit]
     );
     const artifacts = await LocalRdbHelper.query<Artifact>(
-      `SELECT * FROM artifact WHERE name LIKE ? OR description LIKE ? OR nameEn LIKE ? OR material LIKE ? LIMIT ?`,
+      `SELECT * FROM artifact WHERE name LIKE ? ESCAPE '!' OR description LIKE ? ESCAPE '!'
+        OR nameEn LIKE ? ESCAPE '!' OR material LIKE ? ESCAPE '!'
+        ORDER BY isNationalTreasure DESC, name LIMIT ?`,
       [kw, kw, kw, kw, limit]
     );
     const poetries = await LocalRdbHelper.query<Poetry>(
-      `SELECT * FROM poetry WHERE title LIKE ? OR author LIKE ? OR content LIKE ? LIMIT ?`,
+      `SELECT * FROM poetry WHERE title LIKE ? ESCAPE '!' OR author LIKE ? ESCAPE '!'
+        OR content LIKE ? ESCAPE '!' ORDER BY createdAt DESC, title LIMIT ?`,
       [kw, kw, kw, limit]
     );
     return { sites, artifacts, poetries };
+  }
+
+  private escapeLike(value: string): string {
+    return value.replace(/!/g, '!!').replace(/%/g, '!%').replace(/_/g, '!_');
   }
 
   /** 将 archaeology 字段（换行分隔）解析为条目数组 */
