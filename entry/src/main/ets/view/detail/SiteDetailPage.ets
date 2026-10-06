@@ -9,6 +9,7 @@ import { LoadingIndicator } from '../components/LoadingIndicator';
 import { FavoriteTagSheet } from '../components/FavoriteTagSheet';
 import { FavoriteTargetType, NoteTargetType } from '../../common/constants/Enums';
 import { colors } from '../../common/constants/Colors';
+import { LicensedCover } from '../components/LicensedCover';
 import { StringUtil } from '../../common/utils/StringUtil';
 import { DateUtil } from '../../common/utils/DateUtil';
 import { EventBus, AppEvents } from '../../common/utils/EventBus';
@@ -26,6 +27,8 @@ export struct SiteDetailPage {
   @State relatedSites: RecommendItem[] = [];
   @State notes: Note[] = [];
   @State isFav: boolean = false;
+  @State favBusy: boolean = false;
+  @State favError: string = '';
   @State loading: boolean = true;
   @State loadError: boolean = false;
   @State discoveries: DiscoveryItem[] = [];
@@ -106,27 +109,40 @@ export struct SiteDetailPage {
   }
 
   private async toggleFav(): Promise<void> {
-    if (!this.site) return;
-    if (this.isFav) {
-      // 取消收藏
-      await UserDataService.getInstance().toggleFavorite(FavoriteTargetType.SITE, this.site.id);
-      this.isFav = false;
-      EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType: 'site', targetId: this.site.id, favorited: false });
-    } else {
+    if (!this.site || this.favBusy) return;
+    this.favError = '';
+    if (!this.isFav) {
       // 首次收藏：弹出标签选择Sheet
       this.favSheetName = this.site.name;
       this.favSheetTags = [];
       this.favSheetCtrl.open();
+      return;
+    }
+    this.favBusy = true;
+    try {
+      await UserDataService.getInstance().removeFavorite(FavoriteTargetType.SITE, this.site.id);
+      this.isFav = false;
+    } catch (e) {
+      Logger.error('SiteDetailPage', `remove favorite failed: ${e}`);
+      this.favError = '取消收藏失败，请重试。';
+    } finally {
+      this.favBusy = false;
     }
   }
 
   private async confirmFav(tags: string[]): Promise<void> {
-    if (!this.site) return;
-    const us = UserDataService.getInstance();
-    await us.addFavorite(FavoriteTargetType.SITE, this.site.id, tags);
-    this.isFav = true;
-    us.reloadFavCache();
-    EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType: 'site', targetId: this.site.id, favorited: true });
+    if (!this.site || this.favBusy) return;
+    this.favBusy = true;
+    this.favError = '';
+    try {
+      await UserDataService.getInstance().addFavorite(FavoriteTargetType.SITE, this.site.id, tags);
+      this.isFav = true;
+    } catch (e) {
+      Logger.error('SiteDetailPage', `add favorite failed: ${e}`);
+      this.favError = '收藏失败，请重试。';
+    } finally {
+      this.favBusy = false;
+    }
   }
 
   private goNote(n?: Note): void {
@@ -204,15 +220,17 @@ export struct SiteDetailPage {
             // ===== 1. 全宽封面图 =====
             Stack({ alignContent: Alignment.BottomStart }) {
               // 占位色块（无图时）
-              Column().width('100%').height(300).linearGradient({
-                angle: 180,
-                colors: [[this.siteEra()?.colorRes ?? colors.goldDim, 0], [colors.bg, 1]]
-              })
+              LicensedCover({ path: this.site!.coverImage ?? '', tint: this.siteEra()?.colorRes ?? colors.goldDim })
+                .width('100%').height(300)
               // 金色渐入遮罩
               Column().width('100%').height(120)
                 .linearGradient({ angle: 0, colors: [[Color.Transparent, 0], [colors.bg, 1]] })
             }
             .width('100%').height(300)
+            if (this.site!.coverImage === 'images/sites/longmen.jpg') {
+              Text('图片：Rogerwilley · CC0 1.0 · Wikimedia Commons')
+                .fontSize(10).fontColor(colors.textTertiary).padding({ left: 24, top: 6, bottom: 6 })
+            }
 
             // ===== 2. 标题区 =====
             Column({ space: 8 }) {
@@ -290,7 +308,7 @@ export struct SiteDetailPage {
                     Row({ space: 12 }) {
                       Column({ space: 4 }) {
                         Text(ev.year).fontSize(11).fontColor(colors.gold).width(80).textAlign(TextAlign.End)
-                        Stack() { Circle().width(8).height(8).fill(colors.gold) }.width(80)
+                        Stack() { Column().width(8).height(8).borderRadius(4).backgroundColor(colors.gold) }.width(80)
                       }.alignItems(HorizontalAlign.End)
                       Column().width(1).height('100%').backgroundColor(colors.goldDim)
                         .visibility(idx === this.events.length - 1 ? Visibility.Hidden : Visibility.Visible)
@@ -446,6 +464,8 @@ export struct SiteDetailPage {
                 .fontSize(10).fontColor(colors.textTertiary)
             }.width('100%').padding({ top: 20, bottom: 32 }).alignItems(HorizontalAlign.Center)
           }
+          .constraintSize({ maxWidth: 960 })
+          .alignSelf(ItemAlign.Center)
         }
         .scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring).width('100%').height('100%')
 
@@ -455,12 +475,17 @@ export struct SiteDetailPage {
             Text('‹').fontSize(26).fontColor(colors.gold).padding(12)
               .onClick((): void => this.back())
             BlanKSpacer()
-            Text(this.isFav ? '★' : '☆').fontSize(22).fontColor(this.isFav ? colors.gold : colors.textSecondary)
+            Text(this.favBusy ? '…' : (this.isFav ? '★' : '☆'))
+              .fontSize(22).fontColor(this.isFav ? colors.gold : colors.textSecondary)
               .padding(12).onClick((): void => { this.toggleFav(); })
             Text('✍').fontSize(18).fontColor(colors.gold).padding(12)
               .onClick((): void => this.goNote())
           }
           .width('100%').height(56)
+          if (this.favError) {
+            Text(this.favError).fontSize(12).fontColor(colors.cinnabar)
+              .backgroundColor(colors.bgCard).padding({ left: 16, right: 16, bottom: 8 })
+          }
         }
         .width('100%').position({ x: 0, y: 0 })
       }

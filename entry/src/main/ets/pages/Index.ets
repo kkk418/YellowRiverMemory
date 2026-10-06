@@ -14,6 +14,7 @@ import { SyncStatusBar } from '../view/components/SyncStatusBar';
 import { PreferencesHelper } from '../common/utils/PreferencesHelper';
 import { ThemeMode } from '../common/constants/Enums';
 import { Logger } from '../common/utils/Logger';
+import { NoteLeaveGuard } from '../common/utils/NoteLeaveGuard';
 import { colors } from '../common/constants/Colors';
 import { Site, Artifact } from '../model/entity/Entities';
 
@@ -40,6 +41,7 @@ struct Index {
   @Provide('navPathStack') navPathStack: NavPathStack = new NavPathStack();
   @State themeMode: ThemeMode = ThemeMode.INK;
   @State splashDone: boolean = false;
+  @StorageLink('navigationInset') navigationInset: number = 12;
 
   private tabs: TabItem[] = [
     { label: '首页', icon: '⌂' },
@@ -102,12 +104,13 @@ struct Index {
         }
         .hideTitleBar(true).hideToolBar(true)
         .navDestination(this.destinationBuilder)
-        .mode(NavigationMode.Auto)
+        .mode(NavigationMode.Stack)
         .layoutWeight(1)
         .backgroundColor(colors.bg)
       }
       .width('100%').height('100%')
       .backgroundColor(colors.bg)
+      .padding({ bottom: this.navigationInset })
     }
   }
 
@@ -146,6 +149,7 @@ struct Index {
         NoteEditorPage({ params: param ? (param as NoteEditorParams) : {} })
       }
       .hideTitleBar(true).backgroundColor(colors.bg)
+      .onBackPressed((): boolean => NoteLeaveGuard.onBackPressed())
     } else if (name === 'noteList') {
       NavDestination() { NoteListPage() }
       .hideTitleBar(true).backgroundColor(colors.bg)

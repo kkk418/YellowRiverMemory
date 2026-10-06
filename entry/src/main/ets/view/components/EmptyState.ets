@@ -12,11 +12,9 @@ export struct EmptyState {
     Column({ space: 12 }) {
       // 印章式圆形占位
       Stack({ alignContent: Alignment.Center }) {
-        Circle()
-          .width(72).height(72)
-          .fill($r('app.color.gold_10'))
-          .stroke($r('app.color.gold_dim'))
-          .strokeWidth(1)
+        Column().width(72).height(72).borderRadius(36)
+          .backgroundColor($r('app.color.gold_10'))
+          .border({ width: 1, color: $r('app.color.gold_dim') })
         Text(this.icon)
           .fontSize(30)
           .fontColor($r('app.color.gold_primary'))

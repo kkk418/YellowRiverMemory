@@ -199,7 +199,7 @@ export class RecommendationService {
       if (s.city === site.city) { score += 12; reason = score > 15 ? '同城·同代' : '同城脉络'; tag = score > 15 ? 'era' : 'region'; }
       if (s.type === site.type && s.era !== site.era) { score += 6; if (score < 10) reason = '同类型'; }
       // 时序邻近：同一区域相邻时代的遗址更相关（如洛阳的夏→商→汉唐传承）
-      const eras = Object.values(EraType);
+      const eras: EraType[] = EraMeta.ALL.map((era: EraMeta) => era.key);
       const iFrom = eras.indexOf(site.era as EraType);
       const iTo = eras.indexOf(s.era as EraType);
       if (iFrom >= 0 && iTo >= 0 && s.city !== site.city) {

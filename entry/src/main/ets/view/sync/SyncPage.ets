@@ -38,8 +38,7 @@ export struct SyncPage {
   }
 
   @Builder StatusDot(color: ResourceColor) {
-    Circle({ width: 8, height: 8 })
-      .fill(color)
+    Column().width(8).height(8).borderRadius(4).backgroundColor(color)
       .margin({ right: 8 })
   }
 
@@ -123,11 +122,9 @@ export struct SyncPage {
 
               // 金色粒子动效（同步时流动）
               if (this.state.status === SyncStatus.SYNCING) {
-                Circle({ width: 6, height: 6 })
-                  .fill(colors.gold)
+                Column().width(6).height(6).borderRadius(3).backgroundColor(colors.gold)
                   .position({ x: (this.nowTick / 20) % 120, y: 26 })
-                Circle({ width: 4, height: 4 })
-                  .fill(colors.goldDim)
+                Column().width(4).height(4).borderRadius(2).backgroundColor(colors.goldDim)
                   .position({ x: ((this.nowTick / 20) - 40 + 120) % 120, y: 26 })
               }
 

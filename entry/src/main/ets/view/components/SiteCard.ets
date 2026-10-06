@@ -1,6 +1,7 @@
 import { Site } from '../../model/entity/Entities';
 import { EraMeta, CityMeta, SiteTypeMeta } from '../../common/constants/AppMeta';
 import { colors } from '../../common/constants/Colors';
+import { LicensedCover } from './LicensedCover';
 
 /**
  * 遗址卡片（数字敦煌"洞窟卡片"风格）
@@ -19,12 +20,8 @@ export struct SiteCard {
       Stack({ alignContent: Alignment.BottomStart }) {
         // 年代色渐变封面（图片占位）
         Stack({ alignContent: Alignment.Center }) {
-          Column()
+          LicensedCover({ path: this.site.coverImage ?? '', tint: this.siteEra()?.colorRes ?? colors.borderSub })
             .width('100%').height(200)
-            .linearGradient({
-              angle: 135,
-              colors: [[this.siteEra()?.colorRes ?? colors.borderSub, 0], [colors.bgElevated, 0.5], [colors.bg, 1]],
-            });
           // 装饰纹样
           Text('◇')
             .fontSize(60).fontColor(colors.goldDim).opacity(0.15)

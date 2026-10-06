@@ -1,0 +1,10 @@
+(node:8416) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS fresh preset, transaction isolation and rollback
+PASS duplicate favorite, single refresh, note CRUD, draft conflict preservation, topic tombstones
+PASS editor lifecycle autosave, leave guard, restoration, atomic save and conflict save-as-new (host methods)
+PASS real migration functions v1/v2/v3 -> v4 preserve representative user rows
+PASS timeout retention, late callback/timer, exact ACK, unique change count and outbox-only round
+PASS soft-delete propagation, equal-time deterministic conflict convergence and retained conflict rows
+PASS failed KV publish retention, network recovery, every-peer ACK, late ACK status recovery and commit-before-ACK
+PASS reopened SQLite retains draft and outbox; device process restart remains a separate check

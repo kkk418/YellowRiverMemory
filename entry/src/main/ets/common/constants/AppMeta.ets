@@ -190,8 +190,8 @@ export class SystemTags {
  */
 export class AppConstants {
   static DB_NAME: string = 'yellow_river_memory.db';
-  static DB_VERSION: number = 3;
-  static PRESET_VERSION: number = 4;
+  static DB_VERSION: number = 4;
+  static PRESET_VERSION: number = 5;
   static DISTRIBUTED_GROUP_ID: string = 'com.yellowriver.memory.group';
   // Encryption is part of the store creation options. Use a new ID so an existing
   // unencrypted store is not reopened with incompatible options.

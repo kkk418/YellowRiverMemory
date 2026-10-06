@@ -8,6 +8,7 @@ import { StringUtil } from '../../common/utils/StringUtil';
 import { EventBus, AppEvents } from '../../common/utils/EventBus';
 import { EmptyState } from '../components/EmptyState';
 import { NoteEditorParams } from './NoteEditorPage';
+import { NoteDraftService, NoteDraft } from '../../service/NoteDraftService';
 
 interface NoteGroup {
   dateLabel: string;
@@ -18,27 +19,38 @@ interface NoteGroup {
 export struct NoteListPage {
   @Consume('navPathStack') navPathStack: NavPathStack;
   @State notes: Note[] = [];
+  @State drafts: NoteDraft[] = [];
   @State countNotes: Note[] = [];
   @State groups: NoteGroup[] = [];
   @State keyword: string = '';
   @State filter: 'all' | NoteTargetType = 'all';
   @State isLoading: boolean = true;
+  @State loadError: string = '';
+  private loadGeneration: number = 0;
   private onNoteChange = (): void => { this.loadNotes(); };
 
   aboutToAppear(): void {
     this.loadNotes();
     EventBus.getInstance().on(AppEvents.NOTE_CHANGED, this.onNoteChange);
+    EventBus.getInstance().on(AppEvents.NOTE_DRAFT_CHANGED, this.onNoteChange);
   }
 
   aboutToDisappear(): void {
+    this.loadGeneration++;
     EventBus.getInstance().off(AppEvents.NOTE_CHANGED, this.onNoteChange);
+    EventBus.getInstance().off(AppEvents.NOTE_DRAFT_CHANGED, this.onNoteChange);
   }
 
   private loadNotes(): void {
+    const generation = ++this.loadGeneration;
     this.isLoading = true;
     setTimeout(async () => {
+      try {
       const svc = UserDataService.getInstance();
+      const drafts = await NoteDraftService.list();
       let list = await svc.listNotes();
+      if (generation !== this.loadGeneration) return;
+      this.drafts = drafts;
       if (this.keyword.trim()) {
         const kw = this.keyword.trim().toLowerCase();
         list = list.filter(n =>
@@ -52,7 +64,12 @@ export struct NoteListPage {
       }
       this.notes = list;
       this.groupNotes();
-      this.isLoading = false;
+      this.loadError = '';
+      } catch (_) {
+        if (generation === this.loadGeneration) this.loadError = '笔记读取失败，请点击重试。';
+      } finally {
+        if (generation === this.loadGeneration) this.isLoading = false;
+      }
     }, 30);
   }
 
@@ -103,6 +120,15 @@ export struct NoteListPage {
     this.navPathStack.pushPath({ name: 'noteEditor', param: params });
   }
 
+  private openDraft(draft: NoteDraft): void {
+    const params: NoteEditorParams = {
+      draftId: draft.id, targetType: draft.targetType,
+      targetId: draft.targetId ?? undefined,
+      noteId: draft.noteId ?? undefined,
+    };
+    this.navPathStack.pushPath({ name: 'noteEditor', param: params });
+  }
+
   private openTarget(n: Note): void {
     if (n.targetType === NoteTargetType.SITE && n.targetId) {
       const s = CultureService.getInstance().getSiteByIdSync(n.targetId);
@@ -149,12 +175,13 @@ export struct NoteListPage {
     .onClick((): void => { this.goEdit(n); })
   }
 
-  @Builder FilterTab(label: string, value: 'all' | NoteTargetType, count: number) {
+  @Builder FilterTab(label: string, value: 'all' | NoteTargetType) {
     Column({ space: 4 }) {
       Text(label).fontSize(13)
         .fontColor(this.filter === value ? colors.gold : colors.textSecondary)
         .fontWeight(this.filter === value ? FontWeight.Medium : FontWeight.Regular)
-      Text(`${count}`).fontSize(10)
+      Text(`${value === 'all' ? this.countNotes.length :
+        this.countNotes.filter(n => n.targetType === value).length}`).fontSize(10)
         .fontColor(this.filter === value ? colors.gold : colors.textTertiary)
     }
     .padding({ left: 14, right: 14, top: 8, bottom: 8 })
@@ -204,18 +231,46 @@ export struct NoteListPage {
       // 筛选Tab
       Scroll() {
         Row({ space: 4 }) {
-          this.FilterTab('全部', 'all', this.countNotes.length)
-          this.FilterTab('自由笔记', NoteTargetType.STANDALONE,
-            this.countNotes.filter(n => n.targetType === NoteTargetType.STANDALONE).length)
-          this.FilterTab('遗址相关', NoteTargetType.SITE,
-            this.countNotes.filter(n => n.targetType === NoteTargetType.SITE).length)
-          this.FilterTab('文物相关', NoteTargetType.ARTIFACT,
-            this.countNotes.filter(n => n.targetType === NoteTargetType.ARTIFACT).length)
+          this.FilterTab('全部', 'all')
+          this.FilterTab('自由笔记', NoteTargetType.STANDALONE)
+          this.FilterTab('遗址相关', NoteTargetType.SITE)
+          this.FilterTab('文物相关', NoteTargetType.ARTIFACT)
         }
       }
       .scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
       .width('100%')
       .padding({ left: 12, right: 12 })
+
+      if (this.loadError) {
+        Text(this.loadError).fontColor(colors.cinnabar).padding(12)
+          .onClick((): void => { this.loadNotes(); })
+      }
+
+      if (this.drafts.length > 0) {
+        Text(`本机草稿 · ${this.drafts.length}`)
+          .fontSize(12).fontColor(colors.gold).padding({ left: 20, top: 10, bottom: 6 })
+        Scroll() {
+          Row({ space: 10 }) {
+            ForEach(this.drafts, (draft: NoteDraft) => {
+              Column({ space: 5 }) {
+                Text(draft.title || '未命名草稿').fontSize(14).fontColor(colors.textPrimary)
+                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(draft.content || '点击继续编辑').fontSize(11).fontColor(colors.textSecondary)
+                  .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text('继续编辑').fontSize(11).fontColor(colors.gold)
+                  .onClick((): void => { this.openDraft(draft); })
+                Text('删除草稿').fontSize(11).fontColor(colors.cinnabar)
+                  .onClick((): void => {
+                    NoteDraftService.delete(draft.id).catch(() => { this.loadError = '草稿删除失败，请重试。'; });
+                  })
+              }
+              .width(210).padding(12).backgroundColor(colors.bgCard).borderRadius(4)
+            }, (draft: NoteDraft) => draft.id)
+          }
+        }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+          .width('100%').align(Alignment.TopStart)
+          .padding({ left: 20, right: 20, bottom: 10 })
+      }
 
       // 内容
       if (this.isLoading) {
@@ -248,6 +303,7 @@ export struct NoteListPage {
           .padding({ left: 20, right: 20, top: 12, bottom: 32 })
         }
         .scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring).layoutWeight(1)
+        .width('100%').align(Alignment.Top)
       }
     }
     .width('100%').height('100%').backgroundColor(colors.bg)

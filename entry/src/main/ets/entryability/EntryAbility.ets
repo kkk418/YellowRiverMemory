@@ -98,6 +98,17 @@ export default class EntryAbility extends UIAbility {
         }
         Logger.info(TAG, 'loadContent success');
         this.windowReady = true;
+        // API 14 only exposes the UIContext after loadContent has completed.
+        const updateNavigationInset = (): void => {
+          try {
+            const area = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+            AppStorage.setOrCreate('navigationInset', Math.max(12, win.getUIContext().px2vp(area.bottomRect.height)));
+          } catch (e) { Logger.warn(TAG, `navigation inset update failed: ${e}`); }
+        };
+        updateNavigationInset();
+        win.on('avoidAreaChange', (options: window.AvoidAreaOptions): void => {
+          if (options.type === window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR) updateNavigationInset();
+        });
         DistributedDataService.getInstance().init(this.context)
           .then(() => Logger.info(TAG, 'DistributedDataService inited'))
           .catch((e: Error) => Logger.warn(TAG, `DistributedDataService init failed (non-fatal): ${e}`));

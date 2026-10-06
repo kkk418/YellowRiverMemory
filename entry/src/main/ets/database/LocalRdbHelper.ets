@@ -101,6 +101,18 @@ const CREATE_TABLE_SQL: string[] = [
     isDeleted INTEGER DEFAULT 0,
     deviceId TEXT
   );`,
+  `CREATE TABLE IF NOT EXISTS note_draft (
+    id TEXT PRIMARY KEY,
+    noteId TEXT,
+    title TEXT,
+    content TEXT,
+    targetType TEXT NOT NULL,
+    targetId TEXT,
+    tags TEXT,
+    baseUpdatedAt INTEGER DEFAULT 0,
+    baseDeviceId TEXT,
+    savedAt INTEGER NOT NULL
+  );`,
   `CREATE TABLE IF NOT EXISTS topic (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -188,6 +200,58 @@ const CREATE_INDEX_SQL: string[] = [
 const TOPIC_RELATION_UNIQUE_INDEX =
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_relation_identity ON topic_relation(topicId, targetType, targetId);`;
 
+/** Explicit executor: unrelated async work cannot join another caller's transaction. */
+export class RdbSession {
+  private store: relationalStore.RdbStore;
+  private tx?: relationalStore.Transaction;
+
+  constructor(store: relationalStore.RdbStore, tx?: relationalStore.Transaction) {
+    this.store = store;
+    this.tx = tx;
+  }
+
+  async query<T>(sql: string, bindArgs?: relationalStore.ValueType[]): Promise<T[]> {
+    const resultSet = this.tx ? await this.tx.querySql(sql, bindArgs) : await this.store.querySql(sql, bindArgs);
+    const list: T[] = [];
+    try {
+      const names: string[] = [];
+      for (let i = 0; i < resultSet.columnCount; i++) names.push(resultSet.getColumnName(i));
+      while (resultSet.goToNextRow()) {
+        const row: Record<string, relationalStore.ValueType | Uint8Array | null> = {};
+        for (let i = 0; i < names.length; i++) {
+          switch (await resultSet.getColumnType(i)) {
+            case 0: row[names[i]] = null; break;
+            case 1:
+            case 2: row[names[i]] = resultSet.getDouble(i); break;
+            case 4: row[names[i]] = resultSet.getBlob(i); break;
+            default: row[names[i]] = resultSet.getString(i);
+          }
+        }
+        list.push(row as Object as T);
+      }
+    } finally { resultSet.close(); }
+    return list;
+  }
+
+  async execute(sql: string, bindArgs?: relationalStore.ValueType[]): Promise<void> {
+    if (this.tx) await this.tx.execute(sql, bindArgs);
+    else await this.store.executeSql(sql, bindArgs);
+  }
+
+  async insert(table: string, values: relationalStore.ValuesBucket): Promise<number> {
+    return this.tx ? this.tx.insert(table, values) : this.store.insert(table, values);
+  }
+
+  async update(table: string, values: relationalStore.ValuesBucket,
+    predicates: relationalStore.RdbPredicates): Promise<number> {
+    return this.tx ? this.tx.update(values, predicates) : this.store.update(values, predicates);
+  }
+
+  async delete(table: string, predicates: relationalStore.RdbPredicates): Promise<number> {
+    return this.tx ? this.tx.delete(predicates) : this.store.delete(predicates);
+  }
+}
+
 export class LocalRdbHelper {
   private static rdbStore: relationalStore.RdbStore | null = null;
   private static transactionQueue: Promise<void> = Promise.resolve();
@@ -246,59 +310,61 @@ export class LocalRdbHelper {
         await LocalRdbHelper.migrateV2ToV3();
         store.version = 3;
       }
+      if (store.version < 4) {
+        // The additive DDL above created the local-only draft table without touching user rows.
+        store.version = 4;
+      }
       for (const sql of CREATE_INDEX_SQL) await store.executeSql(sql);
       await store.executeSql(TOPIC_RELATION_UNIQUE_INDEX);
     }
   }
 
   private static async migrateV2ToV3(): Promise<void> {
-    await LocalRdbHelper.runInTransaction(async () => {
+    await LocalRdbHelper.runInTransaction(async (db: RdbSession) => {
       for (const table of ['favorite', 'note', 'topic', 'topic_relation']) {
-        await LocalRdbHelper.execute(
+        await db.execute(
           `UPDATE ${table} SET updatedAt=COALESCE(updatedAt, createdAt, 0) WHERE updatedAt IS NULL`);
       }
-      const relations = await LocalRdbHelper.query<Record<string, Object>>(
+      const relations = await db.query<Record<string, Object>>(
         'SELECT id, topicId, targetType, targetId FROM topic_relation ORDER BY COALESCE(updatedAt, createdAt, 0) DESC, createdAt DESC, id DESC');
       const seen = new Set<string>();
       for (const relation of relations) {
         const key = `${String(relation.topicId)}:${String(relation.targetType)}:${String(relation.targetId)}`;
         if (seen.has(key)) {
           const id = String(relation.id);
-          await LocalRdbHelper.execute('DELETE FROM topic_relation WHERE id=?', [id]);
-          await LocalRdbHelper.execute('DELETE FROM sync_outbox WHERE entityType=? AND entityId=?',
+          await db.execute('DELETE FROM topic_relation WHERE id=?', [id]);
+          await db.execute('DELETE FROM sync_outbox WHERE entityType=? AND entityId=?',
             ['topic_relation', id]);
-          await LocalRdbHelper.execute('DELETE FROM sync_local_version WHERE id=?', [`topic_relation/${id}`]);
+          await db.execute('DELETE FROM sync_local_version WHERE id=?', [`topic_relation/${id}`]);
         } else {
           seen.add(key);
         }
       }
-      await LocalRdbHelper.execute(TOPIC_RELATION_UNIQUE_INDEX);
+      await db.execute(TOPIC_RELATION_UNIQUE_INDEX);
     });
     Logger.info(TAG, 'Database migrated from v2 to v3');
   }
 
   private static async migrateV1ToV2(): Promise<void> {
-    const store = LocalRdbHelper.getStore();
-    await store.beginTransaction();
-    try {
-      await LocalRdbHelper.ensureColumn('artifact', 'isNationalTreasure', 'INTEGER DEFAULT 0');
-      await LocalRdbHelper.ensureColumn('poetry', 'createdAt', 'INTEGER');
-      await LocalRdbHelper.ensureColumn('topic_relation', 'isDeleted', 'INTEGER DEFAULT 0');
-      await store.executeSql(`CREATE TABLE IF NOT EXISTS history_record (
+    await LocalRdbHelper.runInTransaction(async (db: RdbSession) => {
+      await LocalRdbHelper.ensureColumn('artifact', 'isNationalTreasure', 'INTEGER DEFAULT 0', db);
+      await LocalRdbHelper.ensureColumn('poetry', 'createdAt', 'INTEGER', db);
+      await LocalRdbHelper.ensureColumn('topic_relation', 'isDeleted', 'INTEGER DEFAULT 0', db);
+      await db.execute(`CREATE TABLE IF NOT EXISTS history_record (
         id TEXT PRIMARY KEY, targetType TEXT NOT NULL, targetId TEXT NOT NULL,
         lastViewedAt INTEGER, viewCount INTEGER DEFAULT 0, createdAt INTEGER,
         updatedAt INTEGER, deviceId TEXT)`);
-      await store.executeSql(`INSERT OR IGNORE INTO history_record
+      await db.execute(`INSERT OR IGNORE INTO history_record
         (id, targetType, targetId, lastViewedAt, viewCount, createdAt, updatedAt, deviceId)
         SELECT 'history_' || targetType || '_' || targetId, targetType, targetId,
           MAX(viewedAt), COUNT(*), MIN(viewedAt), MAX(viewedAt), ''
         FROM browse_history GROUP BY targetType, targetId`);
-      await store.executeSql(`CREATE TABLE IF NOT EXISTS sync_outbox (
+      await db.execute(`CREATE TABLE IF NOT EXISTS sync_outbox (
         id TEXT PRIMARY KEY, entityType TEXT NOT NULL, entityId TEXT NOT NULL,
         entryJson TEXT NOT NULL, updatedAt INTEGER NOT NULL)`);
-      await store.executeSql(`CREATE TABLE IF NOT EXISTS sync_local_version (
+      await db.execute(`CREATE TABLE IF NOT EXISTS sync_local_version (
         id TEXT PRIMARY KEY, entryJson TEXT NOT NULL)`);
-      await store.executeSql(`CREATE TABLE IF NOT EXISTS sync_conflict (
+      await db.execute(`CREATE TABLE IF NOT EXISTS sync_conflict (
         id TEXT PRIMARY KEY, entityType TEXT NOT NULL, entityId TEXT NOT NULL,
         localData TEXT, remoteData TEXT, localDeviceId TEXT, remoteDeviceId TEXT,
         localTimestamp INTEGER, remoteTimestamp INTEGER, resolvedAt INTEGER,
@@ -306,14 +372,14 @@ export class LocalRdbHelper {
 
       // Keep the newest record for each target. The unique constraint then
       // guarantees that local devices share the same one-favorite-per-target rule.
-      const favorites = await LocalRdbHelper.query<Record<string, Object>>(
+      const favorites = await db.query<Record<string, Object>>(
         'SELECT * FROM favorite ORDER BY COALESCE(updatedAt, createdAt, 0) DESC, createdAt DESC, id DESC', []);
       const seen = new Set<string>();
       const retained: Record<string, Object>[] = [];
       for (const favorite of favorites) {
         const key = `${String(favorite.targetType)}:${String(favorite.targetId)}`;
         if (seen.has(key)) {
-          await store.executeSql('DELETE FROM favorite WHERE id=?', [favorite.id as string]);
+          await db.execute('DELETE FROM favorite WHERE id=?', [favorite.id as string]);
         } else {
           seen.add(key);
           retained.push(favorite);
@@ -322,21 +388,18 @@ export class LocalRdbHelper {
       for (const favorite of retained) {
         const canonicalId = LocalRdbHelper.favoriteId(String(favorite.targetType), String(favorite.targetId));
         if (favorite.id !== canonicalId) {
-          await store.executeSql('UPDATE favorite SET id=? WHERE id=?', [canonicalId, favorite.id as string]);
+          await db.execute('UPDATE favorite SET id=? WHERE id=?', [canonicalId, favorite.id as string]);
         }
       }
-      for (const sql of CREATE_INDEX_SQL) await store.executeSql(sql);
-      await store.commit();
-    } catch (e) {
-      await store.rollBack();
-      throw new Error(String(e));
-    }
+      for (const sql of CREATE_INDEX_SQL) await db.execute(sql);
+    });
   }
 
-  private static async ensureColumn(table: string, column: string, definition: string): Promise<void> {
-    const columns = await LocalRdbHelper.query<ColumnInfo>(`PRAGMA table_info(${table})`, []);
+  private static async ensureColumn(table: string, column: string, definition: string,
+    db: RdbSession = LocalRdbHelper.session()): Promise<void> {
+    const columns = await db.query<ColumnInfo>(`PRAGMA table_info(${table})`, []);
     if (!columns.some(item => item.name === column)) {
-      await LocalRdbHelper.getStore().executeSql(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
 
@@ -348,67 +411,29 @@ export class LocalRdbHelper {
     return `topic_relation_${topicId}_${targetType}_${targetId}`;
   }
 
-  /** 通用查询：返回对象数组 */
+  static session(): RdbSession {
+    return new RdbSession(LocalRdbHelper.getStore());
+  }
+
   static async query<T>(sql: string, bindArgs?: relationalStore.ValueType[]): Promise<T[]> {
-    const store = LocalRdbHelper.getStore();
-    const resultSet = await store.querySql(sql, bindArgs);
-    const list: T[] = [];
-    try {
-      const colCount = resultSet.columnCount;
-      const colNames: string[] = [];
-      for (let i = 0; i < colCount; i++) {
-        colNames.push(resultSet.getColumnName(i));
-      }
-      while (resultSet.goToNextRow()) {
-        const obj: Record<string, relationalStore.ValueType | Uint8Array | null> = {};
-        for (let i = 0; i < colCount; i++) {
-          const columnType = await resultSet.getColumnType(i);
-          switch (columnType) {
-            // API 14/26 的运行时返回数值型 ColumnType；ArkData 兼容层不一定暴露枚举对象。
-            case 1: // INTEGER
-            case 2: // REAL
-              obj[colNames[i]] = resultSet.getDouble(i);
-              break;
-            case 3: // TEXT
-              obj[colNames[i]] = resultSet.getString(i);
-              break;
-            case 0: // NULL
-              obj[colNames[i]] = null;
-              break;
-            case 4: // BLOB
-              obj[colNames[i]] = resultSet.getBlob(i);
-              break;
-            default:
-              obj[colNames[i]] = resultSet.getString(i);
-          }
-        }
-        list.push(obj as Object as T);
-      }
-    } finally {
-      resultSet.close();
-    }
-    return list;
+    return LocalRdbHelper.session().query<T>(sql, bindArgs);
   }
 
   static async execute(sql: string, bindArgs?: relationalStore.ValueType[]): Promise<void> {
-    const store = LocalRdbHelper.getStore();
-    await store.executeSql(sql, bindArgs);
+    return LocalRdbHelper.session().execute(sql, bindArgs);
   }
 
   static async insert(table: string, values: relationalStore.ValuesBucket): Promise<number> {
-    const store = LocalRdbHelper.getStore();
-    return await store.insert(table, values);
+    return LocalRdbHelper.session().insert(table, values);
   }
 
   static async update(table: string, values: relationalStore.ValuesBucket,
     predicates: relationalStore.RdbPredicates): Promise<number> {
-    const store = LocalRdbHelper.getStore();
-    return await store.update(values, predicates);
+    return LocalRdbHelper.session().update(table, values, predicates);
   }
 
   static async delete(table: string, predicates: relationalStore.RdbPredicates): Promise<number> {
-    const store = LocalRdbHelper.getStore();
-    return await store.delete(predicates);
+    return LocalRdbHelper.session().delete(table, predicates);
   }
 
   static async count(table: string, where?: string, bindArgs?: relationalStore.ValueType[]): Promise<number> {
@@ -418,20 +443,20 @@ export class LocalRdbHelper {
   }
 
   /** 在事务中执行一批操作 */
-  static async runInTransaction<T>(operation: () => Promise<T>): Promise<T> {
+  static async runInTransaction<T>(operation: (db: RdbSession) => Promise<T>): Promise<T> {
     const store = LocalRdbHelper.getStore();
     const previous = LocalRdbHelper.transactionQueue;
     let release: () => void = () => {};
     LocalRdbHelper.transactionQueue = new Promise<void>((resolve: () => void) => { release = resolve; });
     await previous;
     try {
-      await store.beginTransaction();
+      const tx = await store.createTransaction();
       try {
-        const result = await operation();
-        await store.commit();
+        const result = await operation(new RdbSession(store, tx));
+        await tx.commit();
         return result;
       } catch (e) {
-        await store.rollBack();
+        await tx.rollback();
         throw new Error(String(e));
       }
     } finally {

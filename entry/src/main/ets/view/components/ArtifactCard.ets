@@ -1,6 +1,7 @@
 import { Artifact } from '../../model/entity/Entities';
 import { EraMeta, ArtifactTypeMeta } from '../../common/constants/AppMeta';
 import { colors } from '../../common/constants/Colors';
+import { LicensedCover } from './LicensedCover';
 
 /**
  * 文物卡片：正方形色块+名称
@@ -16,13 +17,8 @@ export struct ArtifactCard {
     Column({ space: 0 }) {
       // 封面（朝代色渐变+文物名水印）
       Stack({ alignContent: Alignment.Center }) {
-        Column()
-          .width('100%')
-          .layoutWeight(1)
-          .linearGradient({
-            angle: 160,
-            colors: [[this.artifactEra()?.colorRes ?? colors.goldDim, 0], [colors.bgElevated, 0.6], [colors.bgCard, 1]],
-          });
+        LicensedCover({ path: this.artifact.coverImage ?? '', tint: this.artifactEra()?.colorRes ?? colors.goldDim })
+          .width('100%').height(120)
         Column({ space: 4 }) {
           if (this.artifact.isNationalTreasure === 1) {
             Text('国宝').fontSize(9).fontColor(colors.bg)

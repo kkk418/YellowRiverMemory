@@ -6,8 +6,10 @@ import { ArtifactCard } from '../components/ArtifactCard';
 import { EraTimeline } from '../components/EraTimeline';
 import { LoadingIndicator } from '../components/LoadingIndicator';
 import { EmptyState } from '../components/EmptyState';
+import { LicensedCover } from '../components/LicensedCover';
 import { EraMeta, CityMeta } from '../../common/constants/AppMeta';
 import { colors } from '../../common/constants/Colors';
+import { EventBus, AppEvents } from '../../common/utils/EventBus';
 
 interface HeroPoetry {
   title: string;
@@ -36,11 +38,24 @@ export struct HomePage {
   @State heroPoetry: HeroPoetry = POETRY_HERO_POOL[0];
   @State loading: boolean = true;
   @State allSites: Site[] = [];
+  @State viewportHeight: number = 700;
+  @State viewportWidth: number = 400;
+  private refreshTimer?: number;
+  private loadGeneration: number = 0;
+  private onUserDataChange = (): void => {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => { this.loadData(); }, 100);
+  };
 
   private makePath(name: string, param?: Object): NavPathInfo {
     const info: NavPathInfo = { name: name };
     if (param !== undefined) info.param = param;
     return info;
+  }
+
+  private heroHeight(): number {
+    return this.viewportHeight < 500 ? Math.max(320, this.viewportHeight * 0.95) :
+      Math.max(420, Math.min(680, this.viewportHeight * 0.72));
   }
   private makeSearchPath(keyword: string): NavPathInfo {
     const param: SearchParam = { keyword: keyword };
@@ -48,25 +63,41 @@ export struct HomePage {
   }
 
   async aboutToAppear() {
+    EventBus.getInstance().on(AppEvents.FAVORITE_CHANGED, this.onUserDataChange);
+    EventBus.getInstance().on(AppEvents.HISTORY_CHANGED, this.onUserDataChange);
     await this.loadData();
   }
 
+  aboutToDisappear(): void {
+    this.loadGeneration++;
+    EventBus.getInstance().off(AppEvents.FAVORITE_CHANGED, this.onUserDataChange);
+    EventBus.getInstance().off(AppEvents.HISTORY_CHANGED, this.onUserDataChange);
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+  }
+
   async loadData() {
-    this.loading = true;
+    const generation = ++this.loadGeneration;
     try {
       const svc = CultureService.getInstance();
       const idx = new Date().getDate() % POETRY_HERO_POOL.length;
+      const dailySite = await svc.getDailySite();
+      const featuredSites = await svc.getFeaturedSites(6);
+      const featuredArtifacts = await svc.getFeaturedArtifacts(8);
+      const cityStats = await svc.getCityStats();
+      const allSites = await svc.getAllSites();
+      const recommendedItems = await RecommendationService.getInstance().getRecommendations(6);
+      if (generation !== this.loadGeneration) return;
       this.heroPoetry = POETRY_HERO_POOL[idx];
-      this.dailySite = await svc.getDailySite();
-      this.featuredSites = await svc.getFeaturedSites(6);
-      this.featuredArtifacts = await svc.getFeaturedArtifacts(8);
-      this.cityStats = await svc.getCityStats();
-      this.allSites = await svc.getAllSites();
-      this.recommendedItems = await RecommendationService.getInstance().getRecommendations(6);
+      this.dailySite = dailySite;
+      this.featuredSites = featuredSites;
+      this.featuredArtifacts = featuredArtifacts;
+      this.cityStats = cityStats;
+      this.allSites = allSites;
+      this.recommendedItems = recommendedItems;
     } catch (e) {
       // ignore
     }
-    this.loading = false;
+    if (generation === this.loadGeneration) this.loading = false;
   }
 
   build() {
@@ -214,6 +245,10 @@ export struct HomePage {
     }
     }
     .width('100%').height('100%')
+    .onAreaChange((_oldArea: Area, newArea: Area): void => {
+      this.viewportHeight = Number(newArea.height);
+      this.viewportWidth = Number(newArea.width);
+    })
   }
 
   @Builder
@@ -238,10 +273,10 @@ export struct HomePage {
         .linearGradient({
           angle: 200,
           colors: [
-            ['#C9A96E00', 0.0],
-            ['#C9A96E08', 0.4],
-            ['#C9A96E1A', 0.7],
-            ['#C9A96E00', 1.0],
+            ['#00C9A96E', 0.0],
+            ['#08C9A96E', 0.4],
+            ['#1AC9A96E', 0.7],
+            ['#00C9A96E', 1.0],
           ],
         });
       // 顶部搜索入口
@@ -267,7 +302,7 @@ export struct HomePage {
       .position({ x: 0, y: 0 })
 
       // 底部诗句+标题（数字敦煌首屏式）
-      Column({ space: 14 }) {
+      Column({ space: this.viewportHeight < 500 ? 8 : 14 }) {
         // 英文副标
         Text('YELLOW RIVER MEMORY')
           .fontSize(10)
@@ -275,7 +310,7 @@ export struct HomePage {
           .fontColor($r('app.color.gold_dim'))
         // 主标题（宋体金色）
         Text('黄河记忆')
-          .fontSize(44)
+          .fontSize(this.viewportHeight < 500 ? 32 : 44)
           .fontColor($r('app.color.text_gold'))
           .fontWeight(FontWeight.Medium)
         // 金色装饰线
@@ -297,7 +332,7 @@ export struct HomePage {
           Text(`—— ${this.heroPoetry.author}《${this.heroPoetry.title}》`)
             .fontSize(10).fontColor($r('app.color.text_tertiary'))
         }
-        .margin({ top: 20 })
+        .margin({ top: this.viewportHeight < 500 ? 8 : 20 })
         .alignItems(HorizontalAlign.Center)
         .width('100%')
         // 开始探索按钮
@@ -310,26 +345,27 @@ export struct HomePage {
         .padding({ left: 20, right: 20, top: 10, bottom: 10 })
         .backgroundColor($r('app.color.gold_primary'))
         .borderRadius(2)
-        .margin({ top: 16 })
+        .margin({ top: this.viewportHeight < 500 ? 8 : 16 })
         .onClick(() => {
           this.navPathStack.pushPath(this.makeSearchPath(''));
         })
       }
       .width('100%')
-      .padding({ left: 24, right: 24, bottom: 48 })
+      .padding({ left: this.viewportWidth >= 840 ? 48 : 24,
+        right: this.viewportWidth >= 840 ? 48 : 24, bottom: this.viewportHeight < 500 ? 16 : 48 })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
-      .height(580)
+      .height(this.heroHeight())
 
       // 分隔阴影（hero和下一段之间）
       Row()
         .width('100%').height(24)
         .linearGradient({
           angle: 180,
-          colors: [['#0A0806', 0.0], ['#0A080600', 1.0]],
+          colors: [['#0A0806', 0.0], ['#000A0806', 1.0]],
         })
-        .position({ x: 0, y: 580 - 24 })
+        .position({ x: 0, y: this.heroHeight() - 24 })
     }
   }
 
@@ -351,12 +387,8 @@ export struct HomePage {
   DailySiteCard(s: Site) {
     Column() {
       Stack({ alignContent: Alignment.BottomStart }) {
-        Column()
+        LicensedCover({ path: s.coverImage ?? '', tint: EraMeta.of(s.era)?.colorRes ?? '#2A241C' })
           .width('100%').height(220)
-          .linearGradient({
-            angle: 135,
-            colors: [[EraMeta.of(s.era)?.colorRes ?? '#2A241C', 0.0], ['#0A0806', 0.7], ['#0A0806', 1.0]],
-          });
         Column({ space: 4 }) {
           Text('每 日 一 址')
             .fontSize(9).letterSpacing(4).fontColor($r('app.color.gold_dim'))

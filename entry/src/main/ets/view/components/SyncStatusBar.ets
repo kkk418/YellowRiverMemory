@@ -41,8 +41,8 @@ export struct SyncStatusBar {
     if (this.visible) {
       Row({ space: 8 }) {
         // 状态指示点
-        Circle({ width: 6, height: 6 })
-          .fill(
+        Column().width(6).height(6).borderRadius(3)
+          .backgroundColor(
             this.state.status === SyncStatus.SYNCING ? colors.gold :
             this.state.status === SyncStatus.ERROR || this.state.conflictCount > 0 ? colors.cinnabar :
             colors.textTertiary

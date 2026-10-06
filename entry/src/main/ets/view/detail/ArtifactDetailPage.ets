@@ -9,6 +9,7 @@ import { LoadingIndicator } from '../components/LoadingIndicator';
 import { FavoriteTagSheet } from '../components/FavoriteTagSheet';
 import { FavoriteTargetType, NoteTargetType } from '../../common/constants/Enums';
 import { colors } from '../../common/constants/Colors';
+import { LicensedCover } from '../components/LicensedCover';
 import { StringUtil } from '../../common/utils/StringUtil';
 import { DateUtil } from '../../common/utils/DateUtil';
 import { EventBus, AppEvents } from '../../common/utils/EventBus';
@@ -24,6 +25,8 @@ export struct ArtifactDetailPage {
   @State site: Site | null = null;
   @State notes: Note[] = [];
   @State isFav: boolean = false;
+  @State favBusy: boolean = false;
+  @State favError: string = '';
   @State loading: boolean = true;
   @State loadError: boolean = false;
   @State relatedSites: RecommendItem[] = [];
@@ -90,24 +93,38 @@ export struct ArtifactDetailPage {
   }
 
   private async toggleFav(): Promise<void> {
-    if (!this.artifact) return;
-    if (this.isFav) {
-      await UserDataService.getInstance().toggleFavorite(FavoriteTargetType.ARTIFACT, this.artifact.id);
-      this.isFav = false;
-      EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType: 'artifact', targetId: this.artifact.id, favorited: false });
-    } else {
+    if (!this.artifact || this.favBusy) return;
+    this.favError = '';
+    if (!this.isFav) {
       this.favSheetName = this.artifact.name;
       this.favSheetCtrl.open();
+      return;
+    }
+    this.favBusy = true;
+    try {
+      await UserDataService.getInstance().removeFavorite(FavoriteTargetType.ARTIFACT, this.artifact.id);
+      this.isFav = false;
+    } catch (e) {
+      Logger.error('ArtifactDetailPage', `remove favorite failed: ${e}`);
+      this.favError = '取消收藏失败，请重试。';
+    } finally {
+      this.favBusy = false;
     }
   }
 
   private async confirmFav(tags: string[]): Promise<void> {
-    if (!this.artifact) return;
-    const us = UserDataService.getInstance();
-    await us.addFavorite(FavoriteTargetType.ARTIFACT, this.artifact.id, tags);
-    this.isFav = true;
-    us.reloadFavCache();
-    EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { targetType: 'artifact', targetId: this.artifact.id, favorited: true });
+    if (!this.artifact || this.favBusy) return;
+    this.favBusy = true;
+    this.favError = '';
+    try {
+      await UserDataService.getInstance().addFavorite(FavoriteTargetType.ARTIFACT, this.artifact.id, tags);
+      this.isFav = true;
+    } catch (e) {
+      Logger.error('ArtifactDetailPage', `add favorite failed: ${e}`);
+      this.favError = '收藏失败，请重试。';
+    } finally {
+      this.favBusy = false;
+    }
   }
 
   private goNote(n?: Note): void {
@@ -176,11 +193,9 @@ export struct ArtifactDetailPage {
           Column({ space: 0 }) {
             // 封面
             Stack({ alignContent: Alignment.BottomStart }) {
-              Column().width('100%').height(320).linearGradient({
-                angle: 180,
-                colors: [[this.artifact!.isNationalTreasure ? colors.cinnabar : this.artifactEra()?.colorRes ?? colors.goldDim, 0],
-                  [colors.bg, 1]]
-              })
+              LicensedCover({ path: this.artifact!.coverImage ?? '',
+                tint: this.artifact!.isNationalTreasure ? colors.cinnabar : this.artifactEra()?.colorRes ?? colors.goldDim })
+                .width('100%').height(320)
               if (this.artifact!.isNationalTreasure) {
                 Text('国  宝')
                   .fontSize(10).fontColor(Color.White).letterSpacing(4)
@@ -296,6 +311,8 @@ export struct ArtifactDetailPage {
                 .fontSize(10).fontColor(colors.textTertiary)
             }.width('100%').padding({ top: 20, bottom: 32 }).alignItems(HorizontalAlign.Center)
           }
+          .constraintSize({ maxWidth: 960 })
+          .alignSelf(ItemAlign.Center)
         }
         .scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring).width('100%').height('100%')
 
@@ -304,11 +321,16 @@ export struct ArtifactDetailPage {
           Row() {
             Text('‹').fontSize(26).fontColor(colors.gold).padding(12).onClick((): void => this.back())
             Blank().layoutWeight(1)
-            Text(this.isFav ? '★' : '☆').fontSize(22).fontColor(this.isFav ? colors.gold : colors.textSecondary)
+            Text(this.favBusy ? '…' : (this.isFav ? '★' : '☆'))
+              .fontSize(22).fontColor(this.isFav ? colors.gold : colors.textSecondary)
               .padding(12).onClick((): void => { this.toggleFav(); })
             Text('✍').fontSize(18).fontColor(colors.gold).padding(12)
               .onClick((): void => this.goNote())
           }.width('100%').height(56)
+          if (this.favError) {
+            Text(this.favError).fontSize(12).fontColor(colors.cinnabar)
+              .backgroundColor(colors.bgCard).padding({ left: 16, right: 16, bottom: 8 })
+          }
         }.width('100%').position({ x: 0, y: 0 })
       }
     }

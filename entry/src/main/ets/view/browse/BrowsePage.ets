@@ -42,6 +42,7 @@ export struct BrowsePage {
   @State selectedTypes: Set<string> = new Set();
   @State selectedArtifactTypes: Set<string> = new Set();
   @State selectedCities: Set<string> = new Set();
+  @State contentWidth: number = 390;
 
   private makePath(name: string, param?: Object): NavPathInfo {
     const info: NavPathInfo = { name: name };
@@ -177,8 +178,8 @@ export struct BrowsePage {
 
       // 2. Tab切换：遗址 / 文物
       Row() {
-        this.TabItem('文化遗址', 0, this.sites.length)
-        this.TabItem('馆藏文物', 1, this.artifacts.length)
+        this.TabItem('文化遗址', 0)
+        this.TabItem('馆藏文物', 1)
       }
       .width('100%')
       .padding({ left: 20, right: 20 })
@@ -213,17 +214,20 @@ export struct BrowsePage {
     }
     .width('100%').height('100%')
     .backgroundColor($r('app.color.ink_wall'))
+    .onAreaChange((_oldArea: Area, newArea: Area): void => {
+      this.contentWidth = Number(newArea.width);
+    })
   }
 
   @Builder
-  TabItem(label: string, idx: number, count: number) {
+  TabItem(label: string, idx: number) {
     Column({ space: 4 }) {
       Row({ space: 6 }) {
         Text(label)
           .fontSize(14)
           .fontColor(this.activeTab === idx ? $r('app.color.text_gold') : $r('app.color.text_tertiary'))
           .fontWeight(this.activeTab === idx ? FontWeight.Medium : FontWeight.Regular)
-        Text(`${count}`)
+        Text(`${idx === 0 ? this.sites.length : this.artifacts.length}`)
           .fontSize(11)
           .fontColor(this.activeTab === idx ? $r('app.color.gold_dim') : $r('app.color.text_tertiary'))
       }
@@ -335,11 +339,16 @@ export struct BrowsePage {
     } else {
       Scroll() {
         Column({ space: 16 }) {
+          Grid() {
           ForEach(this.sites, (s: Site) => {
-            SiteCard({ site: s, onTap: (): void => {
-              this.navPathStack.pushPath({ name: 'siteDetail', param: s });
-            } })
+            GridItem() {
+              SiteCard({ site: s, onTap: (): void => {
+                this.navPathStack.pushPath({ name: 'siteDetail', param: s });
+              } })
+            }
           })
+          }.columnsTemplate(this.contentWidth >= 600 ? '1fr 1fr' : '1fr')
+            .columnsGap(16).rowsGap(16).width('100%')
           if (this.siteHasMore) {
             Button(this.loadingMore ? '加载中…' : (this.moreError ? '加载失败，重试' : '加载更多遗址'))
               .onClick(() => { this.loadMore(); })
@@ -374,7 +383,8 @@ export struct BrowsePage {
               }
             })
           }
-          .columnsTemplate('1fr 1fr')
+          .columnsTemplate(this.contentWidth >= 1000 ? '1fr 1fr 1fr 1fr' :
+            this.contentWidth >= 700 ? '1fr 1fr 1fr' : '1fr 1fr')
           .columnsGap(10)
           .rowsGap(12)
           if (this.artifactHasMore) {

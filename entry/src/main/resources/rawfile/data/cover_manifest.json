@@ -1,0 +1,296 @@
+{
+  "reviewedAt": "2026-10-05",
+  "entries": [
+    {
+      "id": "site_yangshao_cun",
+      "name": "仰韶村遗址",
+      "previousReference": "images/sites/yangshao_cun.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_miaodigou",
+      "name": "庙底沟遗址",
+      "previousReference": "images/sites/miaodigou.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_erlitou",
+      "name": "二里头遗址",
+      "previousReference": "images/sites/erlitou.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_yinxu",
+      "name": "殷墟",
+      "previousReference": "images/sites/yinxu.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_zhengzhou_shangcheng",
+      "name": "郑州商城遗址",
+      "previousReference": "images/sites/zhengzhou_shangcheng.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_sanmenxia_guozhong",
+      "name": "虢国墓地",
+      "previousReference": "images/sites/guoguo.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_longmen",
+      "name": "龙门石窟",
+      "previousReference": "images/sites/longmen.jpg",
+      "bundledPath": "images/sites/longmen.jpg",
+      "status": "licensed"
+    },
+    {
+      "id": "site_white_horse_temple",
+      "name": "白马寺",
+      "previousReference": "images/sites/baimasi.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_dahecun",
+      "name": "大河村遗址",
+      "previousReference": "images/sites/dahecun.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "site_kaifeng_qingmingshanghe",
+      "name": "北宋东京城遗址",
+      "previousReference": "images/sites/dongjing.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yangshao_caiPen",
+      "name": "人面鱼纹彩陶盆",
+      "previousReference": "images/artifacts/renmianyuwen.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_miaodigou_huaguo",
+      "name": "花瓣纹彩陶盆",
+      "previousReference": "images/artifacts/huabanwen.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_miaodigou_yangshao_niao",
+      "name": "彩陶鸟纹钵",
+      "previousReference": "images/artifacts/niaowenbo.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_erlitou_tongjue",
+      "name": "乳钉纹铜爵",
+      "previousReference": "images/artifacts/rudingwenjue.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_erlitou_lvshoulong",
+      "name": "绿松石龙形器",
+      "previousReference": "images/artifacts/lvsonglong.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_erlitou_tongding",
+      "name": "网格纹铜鼎",
+      "previousReference": "images/artifacts/wanggewend.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_erlitou_yue",
+      "name": "镶嵌绿松石兽面纹铜牌饰",
+      "previousReference": "images/artifacts/paidui.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_simuwu",
+      "name": "后母戊鼎（司母戊鼎）",
+      "previousReference": "images/artifacts/simuwu.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_fuhao_zun",
+      "name": "妇好鸮尊",
+      "previousReference": "images/artifacts/xiaozun.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_oracle_bone",
+      "name": "YH127甲骨窖穴甲骨",
+      "previousReference": "images/artifacts/jiagu.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_fuhao_yu",
+      "name": "妇好墓玉器群",
+      "previousReference": "images/artifacts/fuhaoyu.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_zhengzhou_duling",
+      "name": "杜岭方鼎",
+      "previousReference": "images/artifacts/dulingfangding.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_guoguo_yubing_tiejian",
+      "name": "玉柄铁剑",
+      "previousReference": "images/artifacts/yubingtiejian.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_guoguo_ma_keng",
+      "name": "虢季氏铜列鼎",
+      "previousReference": "images/artifacts/lieding.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_longmen_lushena",
+      "name": "卢舍那大佛（奉先寺）",
+      "previousReference": "images/artifacts/lushena.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_longmen_guyangdong",
+      "name": "龙门二十品",
+      "previousReference": "images/artifacts/ershipin.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_dahecun_shuanglianhu",
+      "name": "彩陶双连壶",
+      "previousReference": "images/artifacts/shuanglianhu.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_dahecun_taiyangwen",
+      "name": "太阳纹彩陶片",
+      "previousReference": "images/artifacts/taiyangwen.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_siyangfangzun",
+      "name": "四羊方尊",
+      "previousReference": "images/artifacts/siyangfangzun.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_guoguo_zhuiyumianzhao",
+      "name": "缀玉面罩",
+      "previousReference": "images/artifacts/mianzhao.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_guoguo_tongbing",
+      "name": "铜柄铁剑",
+      "previousReference": "images/artifacts/tongbing.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_longmen_wanfo",
+      "name": "万佛洞小佛群",
+      "previousReference": "images/artifacts/wanfo.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_longmen_lianhua",
+      "name": "莲花洞宝顶莲花",
+      "previousReference": "images/artifacts/lianhua.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yangshao_guanyu",
+      "name": "鹳鱼石斧图彩陶缸",
+      "previousReference": "images/artifacts/guanyu.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_erlitou_tongling",
+      "name": "二里头铜铃",
+      "previousReference": "images/artifacts/tongling.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_erlitou_yazhang",
+      "name": "二里头牙璋",
+      "previousReference": "images/artifacts/yazhang.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_sanlian",
+      "name": "妇好三联甗",
+      "previousReference": "images/artifacts/sanlianyan.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_yinxu_sizugong",
+      "name": "后母辛四足觥",
+      "previousReference": "images/artifacts/sizugong.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_zhengzhou_shoumian",
+      "name": "兽面纹铜方鼎",
+      "previousReference": "images/artifacts/shoumian.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    },
+    {
+      "id": "art_baimasi_qiyun",
+      "name": "齐云塔",
+      "previousReference": "images/artifacts/qiyunta.jpg",
+      "bundledPath": "",
+      "status": "placeholder_missing_unlicensed"
+    }
+  ],
+  "licenses": [
+    {
+      "id": "site_longmen",
+      "path": "images/sites/longmen.jpg",
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Luoyang_-_Boddhisatvas_at_Longmen_Grotto.jpg",
+      "author": "Rogerwilley",
+      "license": "CC0 1.0",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "modifications": "none; original file"
+    }
+  ]
+}

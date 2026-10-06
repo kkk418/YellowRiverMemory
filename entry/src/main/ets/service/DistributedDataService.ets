@@ -18,7 +18,7 @@ import { util } from '@kit.ArkTS';
 import { EventBus, AppEvents } from '../common/utils/EventBus';
 import { SyncStatus } from '../common/constants/Enums';
 import { DateUtil } from '../common/utils/DateUtil';
-import { LocalRdbHelper } from '../database/LocalRdbHelper';
+import { LocalRdbHelper, RdbSession } from '../database/LocalRdbHelper';
 
 const TAG = 'DistributedDataService';
 
@@ -83,15 +83,18 @@ interface KvEntry {
   pD?: string;
 }
 
+/** A peer confirms the exact source version only after its RDB merge commits. */
+interface PeerAck {
+  t: number;
+  d: string;
+  winnerT: number;
+  winnerD: string;
+}
+
 interface LocalEntity {
   updatedAt: number;
   dataStr: string;
   deviceId: string;
-}
-
-interface InFlightItem {
-  id: string;
-  entryJson: string;
 }
 
 interface IdRow {
@@ -144,14 +147,16 @@ export class DistributedDataService {
   private networkConnection?: connection.NetConnection;
   /** 防重入 */
   private syncing = false;
+  private awaitingAck = false;
+  private syncRound = 0;
   /** A change queued during an active sync needs a follow-up pass. */
   private syncAgain = false;
-  /** Only the exact outbox versions sent by this sync may be acknowledged. */
-  private inFlightOutbox: InFlightItem[] = [];
   private inFlightDeviceIds: string[] = [];
   private remoteApplyFailed = false;
-  /** syncComplete has no request ID; after a timeout its callbacks cannot safely acknowledge an outbox. */
-  private completionAckUnsafe = false;
+  /** Full reconciliation is needed at startup and when the available peer set changes. */
+  private needsReconciliation = true;
+  private knownPeerIds: string = '';
+  private actualChanges: Set<string> = new Set();
   private applyQueue: Promise<void> = Promise.resolve();
   private syncTimer?: number;
   private syncTimeout?: number;
@@ -232,7 +237,7 @@ export class DistributedDataService {
           Logger.info(TAG, 'KVStore acquired, subscribing to data changes');
           this.subscribeRemoteChanges();
           this.kvStore.on('syncComplete', (result: [string, number][]) => {
-            this.handleSyncComplete(result);
+            this.handleSyncComplete(result).catch((e: Error) => Logger.warn(TAG, `sync completion check failed: ${e}`));
           });
         } catch (e) {
           Logger.warn(TAG, `getKVStore failed: ${e}`);
@@ -278,8 +283,16 @@ export class DistributedDataService {
           ];
           for (const entry of allChanges) {
             try {
+              if (entry.key.toString().startsWith(`ack/${this.state.localDeviceId}/`)) {
+                await this.tryAcknowledgeOutbox();
+                continue;
+              }
               const applied = await this.applyRemoteEntry(entry.key.toString(), entry.value.value as Uint8Array | string);
-              if (applied) changed++;
+              if (applied) {
+                changed++;
+                const version = this.decodeKvEntry(entry.value.value as Uint8Array | string);
+                this.actualChanges.add(`${entry.key.toString()}@${version.t}:${version.d}`);
+              }
             } catch (err) {
               Logger.error(TAG, `remote entry rejected key=${entry.key.toString()}: ${err}`);
               failed = true;
@@ -295,9 +308,14 @@ export class DistributedDataService {
               this.remoteApplyFailed = true;
             }
           }
-          this.state.lastSyncChanged = changed;
+          if (changed > 0) {
+            this.state.lastSyncChanged = this.actualChanges.size;
+            this.state.lastSyncTime = Date.now();
+            await PreferencesHelper.setLastSyncTime(this.state.lastSyncTime);
+          }
           if (failed) {
             this.state.status = SyncStatus.ERROR;
+            this.needsReconciliation = true;
             this.scheduleSync();
           } else {
             // Receiving data alone does not confirm that our outbox reached peers.
@@ -323,12 +341,16 @@ export class DistributedDataService {
     return applied;
   }
 
+  private decodeKvEntry(value: Uint8Array | string): KvEntry {
+    const text = value instanceof Uint8Array
+      ? util.TextDecoder.create('utf-8', { ignoreBOM: true }).decodeToString(value)
+      : String(value);
+    return JSON.parse(text) as KvEntry;
+  }
+
   private async applyRemoteEntryCore(key: string, value: Uint8Array | string): Promise<boolean> {
     try {
-      const text = value instanceof Uint8Array
-        ? util.TextDecoder.create('utf-8', { ignoreBOM: true }).decodeToString(value)
-        : String(value);
-      const remote: KvEntry = JSON.parse(text);
+      const remote = this.decodeKvEntry(value);
       if (!remote || typeof remote.v !== 'string' || typeof remote.t !== 'number' ||
         !Number.isFinite(remote.t) || typeof remote.d !== 'string' || (remote.s && remote.s !== 1)) {
         throw new Error('Invalid distributed entry');
@@ -352,12 +374,12 @@ export class DistributedDataService {
         throw new Error('Distributed entity identity mismatch');
       }
 
-      const outcome = await LocalRdbHelper.runInTransaction(async (): Promise<MergeOutcome> => {
-        const local = await this.readLocalEntity(entityType, entityId, remote.v);
+      const outcome = await LocalRdbHelper.runInTransaction(async (db: RdbSession): Promise<MergeOutcome> => {
+        const local = await this.readLocalEntity(entityType, entityId, remote.v, db);
         const localId = local && entityType === 'topic_relation'
           ? String((JSON.parse(local.dataStr) as Record<string, Object>).id) : entityId;
         if (!local) {
-          const data = await this.persistLocalEntity(entityType, entityId, remote.v, remote.d);
+          const data = await this.persistLocalEntity(entityType, entityId, remote.v, remote.d, db);
           return { applied: true, republish: false, entityId, data };
         }
         const localTime = local.updatedAt ?? 0;
@@ -366,22 +388,44 @@ export class DistributedDataService {
           return { applied: false, republish: false, entityId: localId };
         }
         const remoteWins = remote.t > localTime ||
-          (remote.t === localTime && remote.d.localeCompare(localDevice) > 0);
-        if (local.dataStr !== remote.v && await this.isConcurrentVersion(entityType, localId, local, remote)) {
+          (remote.t === localTime && remote.d > localDevice);
+        if (local.dataStr !== remote.v && await this.isConcurrentVersion(entityType, localId, local, remote, db)) {
           await this.recordConflict(entityType, localId, local.dataStr, remote.v,
-            localDevice, remote.d, localTime, remote.t);
+            localDevice, remote.d, localTime, remote.t, db);
         }
         if (remoteWins) {
-          const data = await this.persistLocalEntity(entityType, localId, remote.v, remote.d);
+          const data = await this.persistLocalEntity(entityType, localId, remote.v, remote.d, db);
+          // An older local edit has been superseded by the recorded winner.
+          const stale = await db.query<EntryJsonRow>(
+            'SELECT entryJson FROM sync_outbox WHERE id=? LIMIT 1', [key]);
+          if (stale.length > 0) {
+            const pending = JSON.parse(stale[0].entryJson) as KvEntry;
+            if (pending.t === localTime && pending.d === localDevice) {
+              await db.execute('DELETE FROM sync_outbox WHERE id=? AND entryJson=?',
+                [key, stale[0].entryJson]);
+            }
+          }
           return { applied: true, republish: false, entityId: localId, data };
         }
         return { applied: false, republish: true, entityId: localId };
       });
       if (outcome.applied && outcome.data) {
+        await this.refreshPendingCount();
         await this.notifyEntityChanged(entityType, outcome.entityId, outcome.data);
         Logger.info(TAG, `remote→local ${entityType}/${outcome.entityId}`);
       }
-      if (outcome.republish) this.scheduleSync();
+      await this.ackRemoteVersion(key, remote, entityType, outcome.entityId);
+      if (outcome.republish && this.kvStore) {
+        const winner = await this.readLocalEntity(entityType, outcome.entityId, remote.v);
+        if (winner) {
+          const version: KvEntry = {
+            v: winner.dataStr, t: winner.updatedAt,
+            d: winner.deviceId || this.state.localDeviceId, s: 1,
+          };
+          await this.putIfNewer(key, JSON.stringify(version), version);
+          this.scheduleSync();
+        }
+      }
       return outcome.applied;
     } catch (e) {
       Logger.warn(TAG, `applyRemoteEntry failed key=${key}: ${e}`);
@@ -391,10 +435,10 @@ export class DistributedDataService {
 
   /** Compare the parent versions so an acknowledged concurrent edit remains visible. */
   private async isConcurrentVersion(entityType: EntityType, entityId: string,
-    local: LocalEntity, remote: KvEntry): Promise<boolean> {
+    local: LocalEntity, remote: KvEntry, db: RdbSession = LocalRdbHelper.session()): Promise<boolean> {
     if (local.deviceId !== this.state.localDeviceId || remote.d === local.deviceId) return false;
     const key = `${entityType}/${entityId}`;
-    const versions = await LocalRdbHelper.query<EntryJsonRow>(
+    const versions = await db.query<EntryJsonRow>(
       'SELECT entryJson FROM sync_local_version WHERE id=? LIMIT 1', [key]);
     if (versions.length > 0) {
       const localVersion = JSON.parse(versions[0].entryJson) as KvEntry;
@@ -405,7 +449,7 @@ export class DistributedDataService {
         return true;
       }
     }
-    const rows = await LocalRdbHelper.query<EntryJsonRow>(
+    const rows = await db.query<EntryJsonRow>(
       'SELECT entryJson FROM sync_outbox WHERE id=? LIMIT 1', [key]);
     if (rows.length === 0) return false;
     const pending = JSON.parse(rows[0].entryJson) as KvEntry;
@@ -435,20 +479,20 @@ export class DistributedDataService {
 
   /** Persist a validated entity; caller controls the RDB transaction. */
   private async persistLocalEntity(entityType: EntityType, entityId: string, dataJson: string,
-    fromDevice: string): Promise<Record<string, Object>> {
+    fromDevice: string, db: RdbSession = LocalRdbHelper.session()): Promise<Record<string, Object>> {
     const data = JSON.parse(dataJson) as Record<string, Object>;
     data.updatedAt = data.updatedAt ?? Date.now();
     data.deviceId = fromDevice || String(data.deviceId ?? '');
     switch (entityType) {
       case 'favorite':
-        await this.upsertFavorite(entityId, data);
+        await this.upsertFavorite(entityId, data, db);
         break;
       case 'topic_relation':
-        await this.upsertTopicRelation(entityId, data);
+        await this.upsertTopicRelation(entityId, data, db);
         break;
       case 'note':
       case 'topic':
-        await this.upsertById(entityType, entityId, data);
+        await this.upsertById(entityType, entityId, data, db);
         break;
       default:
         throw new Error(`Unsupported entityType: ${entityType}`);
@@ -474,32 +518,32 @@ export class DistributedDataService {
     EventBus.getInstance().emit(AppEvents.DATA_INIT_COMPLETED, { source: 'sync' });
   }
 
-  private async upsertFavorite(entityId: string, data: Record<string, Object>): Promise<void> {
+  private async upsertFavorite(entityId: string, data: Record<string, Object>, db: RdbSession = LocalRdbHelper.session()): Promise<void> {
     const targetType = String(data.targetType ?? '');
     const targetId = String(data.targetId ?? '');
     if (!targetType || !targetId) throw new Error('Remote favorite is missing target identity');
-    const existing = await LocalRdbHelper.query<IdRow>(
+    const existing = await db.query<IdRow>(
       'SELECT id FROM favorite WHERE targetType=? AND targetId=? LIMIT 1', [targetType, targetId]);
     if (existing.length > 0) data.id = existing[0].id;
     else data.id = String(data.id ?? DateUtil.uuid());
-    await this.upsertById('favorite', String(data.id), data);
+    await this.upsertById('favorite', String(data.id), data, db);
   }
 
-  private async upsertTopicRelation(entityId: string, data: Record<string, Object>): Promise<void> {
+  private async upsertTopicRelation(entityId: string, data: Record<string, Object>, db: RdbSession = LocalRdbHelper.session()): Promise<void> {
     const topicId = String(data.topicId ?? '');
     const targetType = String(data.targetType ?? '');
     const targetId = String(data.targetId ?? '');
     if (!topicId || !targetType || !targetId) throw new Error('Remote topic relation is missing target identity');
-    const existing = await LocalRdbHelper.query<IdRow>(
+    const existing = await db.query<IdRow>(
       'SELECT id FROM topic_relation WHERE topicId=? AND targetType=? AND targetId=? LIMIT 1',
       [topicId, targetType, targetId]);
     data.id = existing.length > 0 ? existing[0].id :
       LocalRdbHelper.topicRelationId(topicId, targetType, targetId);
-    await this.upsertById('topic_relation', String(data.id), data);
+    await this.upsertById('topic_relation', String(data.id), data, db);
   }
 
-  private async upsertById(table: string, id: string, data: Record<string, Object>): Promise<void> {
-    const exist = await LocalRdbHelper.query<IdRow>(`SELECT id FROM ${table} WHERE id=? LIMIT 1`, [id]);
+  private async upsertById(table: string, id: string, data: Record<string, Object>, db: RdbSession = LocalRdbHelper.session()): Promise<void> {
+    const exist = await db.query<IdRow>(`SELECT id FROM ${table} WHERE id=? LIMIT 1`, [id]);
     const cleanData: relationalStore.ValuesBucket = {};
     const allowed = this.allowedColumns(table);
     for (const k of Object.keys(data)) {
@@ -513,9 +557,9 @@ export class DistributedDataService {
     if (exist.length > 0) {
       const predicates = new relationalStore.RdbPredicates(table);
       predicates.equalTo('id', id);
-      await LocalRdbHelper.update(table, cleanData, predicates);
+      await db.update(table, cleanData, predicates);
     } else {
-      await LocalRdbHelper.insert(table, cleanData);
+      await db.insert(table, cleanData);
     }
   }
 
@@ -538,24 +582,27 @@ export class DistributedDataService {
   }
 
   private async readLocalEntity(entityType: EntityType, entityId: string,
-    remoteData?: string): Promise<LocalEntity | null> {
+    remoteData?: string, db: RdbSession = LocalRdbHelper.session()): Promise<LocalEntity | null> {
     let rows: Record<string, Object>[];
     if (entityType === 'favorite') {
       const splitAt = entityId.indexOf(':');
       if (splitAt < 0) return null;
-      rows = await LocalRdbHelper.query<Record<string, Object>>(
+      rows = await db.query<Record<string, Object>>(
         'SELECT * FROM favorite WHERE targetType=? AND targetId=? LIMIT 1',
         [entityId.slice(0, splitAt), entityId.slice(splitAt + 1)]);
     } else if (entityType === 'topic_relation' && remoteData) {
       const relation = JSON.parse(remoteData) as Record<string, Object>;
-      rows = await LocalRdbHelper.query<Record<string, Object>>(
+      rows = await db.query<Record<string, Object>>(
         'SELECT * FROM topic_relation WHERE topicId=? AND targetType=? AND targetId=? LIMIT 1',
         [String(relation.topicId ?? ''), String(relation.targetType ?? ''), String(relation.targetId ?? '')]);
     } else {
-      rows = await LocalRdbHelper.query<Record<string, Object>>(
+      rows = await db.query<Record<string, Object>>(
         `SELECT * FROM ${entityType} WHERE id=? LIMIT 1`, [entityId]);
     }
-    if (rows.length === 0) return null;
+    if (rows.length === 0) {
+      Logger.warn(TAG, `local entity lookup empty type=${entityType} id=${entityId}`);
+      return null;
+    }
     const row = rows[0];
     return {
       updatedAt: (row.updatedAt as number) ?? (row.createdAt as number) ?? 0,
@@ -565,9 +612,9 @@ export class DistributedDataService {
   }
 
   private async recordConflict(entityType: string, entityId: string, localData: string, remoteData: string,
-    localDev: string, remoteDev: string, localT: number, remoteT: number): Promise<void> {
+    localDev: string, remoteDev: string, localT: number, remoteT: number, db: RdbSession = LocalRdbHelper.session()): Promise<void> {
     try {
-      const localFirst = localDev.localeCompare(remoteDev) <= 0;
+      const localFirst = localDev <= remoteDev;
       const firstTime = localFirst ? localT : remoteT;
       const secondTime = localFirst ? remoteT : localT;
       const id = `conflict_${entityType}_${entityId}_${firstTime}_${secondTime}`;
@@ -575,7 +622,7 @@ export class DistributedDataService {
       const remoteJson = localFirst ? remoteData : localData;
       const firstDevice = localFirst ? localDev : remoteDev;
       const secondDevice = localFirst ? remoteDev : localDev;
-      await LocalRdbHelper.execute(
+      await db.execute(
         `INSERT OR IGNORE INTO sync_conflict(id, entityType, entityId, localData, remoteData,
           localDeviceId, remoteDeviceId, localTimestamp, remoteTimestamp, createdAt)
          VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -583,6 +630,7 @@ export class DistributedDataService {
           firstTime, secondTime, Date.now()]);
     } catch (e) {
       Logger.warn(TAG, `recordConflict failed: ${e}`);
+      throw new Error(String(e));
     }
   }
 
@@ -620,6 +668,11 @@ export class DistributedDataService {
           lastSeenTime: Date.now(),
         }))
         .filter(device => device.deviceId.length > 0);
+      const peerIds = this.state.remoteDevices.map(device => device.deviceId).sort().join('|');
+      if (peerIds !== this.knownPeerIds) {
+        this.knownPeerIds = peerIds;
+        this.needsReconciliation = true;
+      }
     } catch (e) {
       Logger.warn(TAG, `refresh devices failed: ${e}`);
       this.state.remoteDevices = [];
@@ -649,71 +702,110 @@ export class DistributedDataService {
   }
 
   private async handleSyncComplete(result: [string, number][]): Promise<void> {
-    if (!this.syncing) return;
-    // A timed-out sync may report completion while a retry is active. The API does not
-    // identify which call completed, so no callback in this process can safely ack it.
-    if (this.completionAckUnsafe) {
-      Logger.warn(TAG, 'syncComplete ignored: a prior timeout made outbox acknowledgement ambiguous');
-      return;
-    }
-    if (this.syncTimeout) clearTimeout(this.syncTimeout);
-    const successfulDeviceIds = result.filter(item => item[1] === 0).map(item => item[0]);
-    const succeeded = !this.remoteApplyFailed && this.inFlightDeviceIds.length > 0 &&
-      result.every(item => item[1] === 0) &&
-      this.inFlightDeviceIds.every(id => successfulDeviceIds.indexOf(id) >= 0);
-    if (succeeded) {
-      try {
-        await LocalRdbHelper.runInTransaction(async () => {
-          for (const item of this.inFlightOutbox) {
-            await LocalRdbHelper.execute('DELETE FROM sync_outbox WHERE id=? AND entryJson=?',
-              [item.id, item.entryJson]);
-          }
-        });
-      } catch (e) {
-        Logger.warn(TAG, `acknowledge outbox failed: ${e}`);
+    // The SDK supplies device results but no request identity. A late callback
+    // can therefore only wake the versioned acknowledgement check.
+    if (result.some(item => item[1] !== 0)) Logger.warn(TAG, 'peer sync reported an error; outbox retained');
+    await this.tryAcknowledgeOutbox();
+  }
+
+  private async ackRemoteVersion(key: string, remote: KvEntry, entityType: EntityType,
+    entityId: string): Promise<void> {
+    if (!this.kvStore || !this.deviceManager || remote.d === this.state.localDeviceId) return;
+    const peerId = this.deviceManager.getLocalDeviceNetworkId();
+    if (!peerId) return;
+    const winner = await this.readLocalEntity(entityType, entityId, remote.v);
+    if (!winner) return;
+    const ack: PeerAck = {
+      t: remote.t, d: remote.d, winnerT: winner.updatedAt, winnerD: winner.deviceId,
+    };
+    const ackKey = `ack/${remote.d}/${peerId}/${key}`;
+    const value = JSON.stringify(ack);
+    try {
+      if (String(await this.kvStore.get(ackKey)) === value) return;
+    } catch (_) { /* first acknowledgement for this version */ }
+    await this.kvStore.put(ackKey, value);
+    this.scheduleSync();
+  }
+
+  /** Only a peer's committed, matching version can remove a durable outbox row. */
+  private async tryAcknowledgeOutbox(): Promise<void> {
+    if (!this.kvStore) return;
+    const peers = this.awaitingAck ? this.inFlightDeviceIds :
+      this.state.remoteDevices.filter(d => d.isOnline).map(d => d.deviceId);
+    if (peers.length === 0) return;
+    const pending = await LocalRdbHelper.query<PendingRow>(
+      'SELECT id, entityType, entityId, entryJson FROM sync_outbox', []);
+    let acknowledged = 0;
+    for (const item of pending) {
+      const version = JSON.parse(item.entryJson) as KvEntry;
+      const local = await this.readLocalEntity(item.entityType, item.entityId);
+      if (!local || local.updatedAt !== version.t || local.deviceId !== version.d) continue;
+      let allPeersConfirmed = true;
+      for (const peerId of peers) {
+        try {
+          const raw = await this.kvStore.get(`ack/${this.state.localDeviceId}/${peerId}/${item.id}`);
+          const ack = JSON.parse(String(raw)) as PeerAck;
+          if (ack.t !== version.t || ack.d !== version.d ||
+            ack.winnerT !== version.t || ack.winnerD !== version.d) allPeersConfirmed = false;
+        } catch (_) { allPeersConfirmed = false; }
+        if (!allPeersConfirmed) break;
       }
-      this.state.lastSyncTime = Date.now();
-      await PreferencesHelper.setLastSyncTime(this.state.lastSyncTime);
+      if (!allPeersConfirmed) continue;
+      const removed = await LocalRdbHelper.runInTransaction(async (db: RdbSession): Promise<boolean> => {
+        const current = await db.query<EntryJsonRow>(
+          'SELECT entryJson FROM sync_outbox WHERE id=? LIMIT 1', [item.id]);
+        if (current.length === 0 || current[0].entryJson !== item.entryJson) return false;
+        await db.execute('DELETE FROM sync_outbox WHERE id=? AND entryJson=?',
+          [item.id, item.entryJson]);
+        return true;
+      });
+      if (removed) {
+        acknowledged++;
+        this.actualChanges.add(`${item.id}@${version.t}:${version.d}`);
+      }
     }
     await this.refreshPendingCount();
-    await this.refreshConflictCount();
-    this.state.progressPercent = 100;
-    this.state.status = !succeeded ? SyncStatus.ERROR :
-      (this.state.conflictCount > 0 ? SyncStatus.CONFLICT : SyncStatus.IDLE);
-    this.syncing = false;
-    this.inFlightOutbox = [];
-    this.inFlightDeviceIds = [];
-    this.notifyStatusChange();
-    if (succeeded) this.retryDelayMs = 2000;
-    if (!succeeded) this.scheduleRetry();
-    if (succeeded && this.syncAgain) {
-      this.syncAgain = false;
-      this.scheduleSync();
+    if (acknowledged > 0) {
+      this.state.lastSyncTime = Date.now();
+      await PreferencesHelper.setLastSyncTime(this.state.lastSyncTime);
+      this.state.lastSyncChanged = this.actualChanges.size;
     }
+    if (this.state.pendingCount === 0 && (this.awaitingAck || (!this.syncing && acknowledged > 0))) {
+      if (this.syncTimeout) clearTimeout(this.syncTimeout);
+      this.syncing = false;
+      this.awaitingAck = false;
+      this.inFlightDeviceIds = [];
+      this.state.progressPercent = 100;
+      await this.refreshConflictCount();
+      this.state.status = this.state.conflictCount > 0 ? SyncStatus.CONFLICT : SyncStatus.IDLE;
+      this.retryDelayMs = 2000;
+      if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(); }
+    }
+    this.notifyStatusChange();
   }
 
   /** Commit the entity and its pending sync version together. */
-  async commitLocalChange(entityType: EntityType, entityId: string, write: () => Promise<void>,
+  async commitLocalChange(entityType: EntityType, entityId: string, write: (db: RdbSession) => Promise<void>,
     baseTime: number = 0, baseDeviceId: string = ''): Promise<void> {
-    await this.commitLocalBatch(async (record: RecordLocalChange): Promise<void> => {
-      await write();
+    await this.commitLocalBatch(async (record: RecordLocalChange, db: RdbSession): Promise<void> => {
+      await write(db);
       await record(entityType, entityId, baseTime, baseDeviceId);
     });
   }
 
   /** All writes and their outbox versions commit atomically; publish only after commit. */
-  async commitLocalBatch(write: (record: RecordLocalChange) => Promise<void>): Promise<void> {
-    const changes = await LocalRdbHelper.runInTransaction(async (): Promise<PreparedChange[]> => {
+  async commitLocalBatch(write: (record: RecordLocalChange, db: RdbSession) => Promise<void>): Promise<void> {
+    const changes = await LocalRdbHelper.runInTransaction(async (db: RdbSession): Promise<PreparedChange[]> => {
       const prepared: PreparedChange[] = [];
       const record: RecordLocalChange = async (entityType: EntityType, entityId: string,
         baseTime: number = 0, baseDeviceId: string = ''): Promise<void> => {
-        const local = await this.readLocalEntity(entityType, entityId);
+        const local = await this.readLocalEntity(entityType, entityId, undefined, db);
         if (!local) throw new Error(`Local change did not create ${entityType}/${entityId}`);
         const change = this.prepareChange(entityType, entityId, local.dataStr, baseTime, baseDeviceId);
-        await this.persistChange(entityType, change);
+        await this.persistChange(entityType, change, db);
         prepared.push(change);
       };
-      await write(record);
+      await write(record, db);
       return prepared;
     });
     // Local callers can refresh immediately; the durable outbox survives a failed KV write.
@@ -727,8 +819,8 @@ export class DistributedDataService {
     baseTime: number = 0, baseDeviceId: string = ''): Promise<void> {
     const dataString = typeof data === 'string' ? data : JSON.stringify(data);
     const change = this.prepareChange(entityType, entityId, dataString, baseTime, baseDeviceId);
-    await LocalRdbHelper.runInTransaction(async () => {
-      await this.persistChange(entityType, change);
+    await LocalRdbHelper.runInTransaction(async (db: RdbSession) => {
+      await this.persistChange(entityType, change, db);
     });
     await this.publishChange(change);
   }
@@ -752,11 +844,11 @@ export class DistributedDataService {
     return { key, stableId, value: JSON.stringify(entry), entry };
   }
 
-  private async persistChange(entityType: EntityType, change: PreparedChange): Promise<void> {
-    await LocalRdbHelper.execute(
+  private async persistChange(entityType: EntityType, change: PreparedChange, db: RdbSession = LocalRdbHelper.session()): Promise<void> {
+    await db.execute(
       'INSERT OR REPLACE INTO sync_outbox(id, entityType, entityId, entryJson, updatedAt) VALUES(?, ?, ?, ?, ?)',
       [change.key, entityType, change.stableId, change.value, change.entry.t]);
-    await LocalRdbHelper.execute(
+    await db.execute(
       'INSERT OR REPLACE INTO sync_local_version(id, entryJson) VALUES(?, ?)', [change.key, change.value]);
   }
 
@@ -807,7 +899,7 @@ export class DistributedDataService {
       return;
     }
     const existingWins = existing.t > candidate.t ||
-      (existing.t === candidate.t && existing.d.localeCompare(candidate.d) > 0);
+      (existing.t === candidate.t && existing.d > candidate.d);
     if (existingWins) {
       await this.applyRemoteEntry(key, existingText);
       return;
@@ -839,113 +931,146 @@ export class DistributedDataService {
       this.syncAgain = true;
       return;
     }
-    if (!this.kvStore && this.context) await this.init(this.context);
-    if (!this.kvStore) {
-      Logger.info(TAG, 'requestSync: KV not available (offline/permission)');
-      return;
-    }
-    this.refreshRemoteDevices();
-    let hasDefaultNetwork = false;
-    try { hasDefaultNetwork = await connection.hasDefaultNet(); }
-    catch (e) { Logger.warn(TAG, `requestSync network check failed: ${e}`); }
-    // Distributed peers may be reachable directly without a default internet route.
-    this.state.networkAvailable = hasDefaultNetwork || this.state.remoteDevices.some(d => d.isOnline);
+    // Claim the round before any await; network checks may overlap foreground events.
     this.syncing = true;
+    this.awaitingAck = false;
+    const round = ++this.syncRound;
     this.remoteApplyFailed = false;
-    this.state.status = SyncStatus.SYNCING;
-    this.state.progressPercent = 10;
-    this.notifyStatusChange();
     try {
+      if (!this.kvStore && this.context) await this.init(this.context);
+      if (!this.kvStore) {
+        this.syncing = false;
+        Logger.info(TAG, 'requestSync: KV not available (offline/permission)');
+        return;
+      }
+      this.refreshRemoteDevices();
+      let hasDefaultNetwork = false;
+      try { hasDefaultNetwork = await connection.hasDefaultNet(); }
+      catch (e) { Logger.warn(TAG, `requestSync network check failed: ${e}`); }
+      this.state.networkAvailable = hasDefaultNetwork || this.state.remoteDevices.some(d => d.isOnline);
+      this.actualChanges.clear();
+      this.state.lastSyncChanged = 0;
+      await this.tryAcknowledgeOutbox();
+      this.state.status = SyncStatus.SYNCING;
+      this.state.progressPercent = 10;
+      this.notifyStatusChange();
       this.refreshRemoteDevices();
       // Re-write the durable outbox before syncing. Records include soft deletes.
       // Recover any KV entry whose earlier dataChange callback failed to write RDB.
-      for (const entityType of ALL_ENTITY_TYPES) {
-        const entries = await this.kvStore.getEntries(`${entityType}/`);
-        for (const item of entries) {
-          try {
-            await this.applyRemoteEntry(item.key.toString(), item.value.value as Uint8Array | string);
-          } catch (e) {
-            // Keep the bad entry in the KV store for inspection, but allow other keys
-            // and the local outbox to make progress.
-            Logger.error(TAG, `stored distributed entry rejected key=${item.key.toString()}: ${e}`);
-            this.remoteApplyFailed = true;
+      if (this.needsReconciliation) {
+        for (const entityType of ALL_ENTITY_TYPES) {
+          const entries = await this.kvStore.getEntries(`${entityType}/`);
+          for (const item of entries) {
+            try {
+              const applied = await this.applyRemoteEntry(item.key.toString(), item.value.value as Uint8Array | string);
+              if (applied) {
+                const version = this.decodeKvEntry(item.value.value as Uint8Array | string);
+                this.actualChanges.add(`${item.key.toString()}@${version.t}:${version.d}`);
+              }
+            } catch (e) {
+              Logger.error(TAG, `stored distributed entry rejected key=${item.key.toString()}: ${e}`);
+              this.remoteApplyFailed = true;
+            }
           }
         }
       }
-      const pending = await LocalRdbHelper.query<PendingRow>(
+      let pending = await LocalRdbHelper.query<PendingRow>(
         'SELECT id, entityType, entityId, entryJson FROM sync_outbox ORDER BY updatedAt', []);
-      this.inFlightOutbox = pending.map((item): InFlightItem => ({ id: item.id, entryJson: item.entryJson }));
       for (const item of pending) {
         const candidate = JSON.parse(item.entryJson) as KvEntry;
         await this.putIfNewer(`${item.entityType}/${item.entityId}`, item.entryJson, candidate);
       }
       this.state.progressPercent = 40;
 
-      // Push all records, including soft-deleted rows, for first-time devices.
-      let pushedCount = 0;
-      for (const t of ALL_ENTITY_TYPES) {
-        try {
-          const rows = await LocalRdbHelper.query<Record<string, Object>>(`SELECT * FROM ${t}`, []);
-          for (const r of rows) {
-            const id = String(r.id ?? '');
-            if (!id) continue;
-            const syncId = t === 'favorite'
-              ? `${String(r.targetType ?? '')}:${String(r.targetId ?? '')}` : id;
-            const e: KvEntry = {
-              v: JSON.stringify(r),
-              t: (r.updatedAt as number) ?? Date.now(),
-              d: String(r.deviceId || this.state.localDeviceId),
-              s: 1,
-            };
-            await this.putIfNewer(`${t}/${syncId}`, JSON.stringify(e), e);
-            pushedCount++;
+      // Bootstrap or recover once per peer set. Normal edits only visit the outbox.
+      let scannedCount = 0;
+      if (this.needsReconciliation) {
+        for (const t of ALL_ENTITY_TYPES) {
+          try {
+            const rows = await LocalRdbHelper.query<Record<string, Object>>(`SELECT * FROM ${t}`, []);
+            for (const r of rows) {
+              const id = String(r.id ?? '');
+              if (!id) continue;
+              const syncId = t === 'favorite'
+                ? `${String(r.targetType ?? '')}:${String(r.targetId ?? '')}` : id;
+              const e: KvEntry = {
+                v: JSON.stringify(r),
+                t: (r.updatedAt as number) ?? Date.now(),
+                d: String(r.deviceId || this.state.localDeviceId),
+                s: 1,
+              };
+              await this.putIfNewer(`${t}/${syncId}`, JSON.stringify(e), e);
+              scannedCount++;
+            }
+          } catch (e) {
+            Logger.warn(TAG, `push all ${t} failed: ${e}`);
+            throw new Error(String(e));
           }
-        } catch (e) {
-          Logger.warn(TAG, `push all ${t} failed: ${e}`);
-          throw new Error(String(e));
         }
+        if (!this.remoteApplyFailed) this.needsReconciliation = false;
       }
+      // Reconciliation can supersede a pending version. Track only the rows
+      // that still exist before deciding whether this round needs an ACK.
+      pending = await LocalRdbHelper.query<PendingRow>(
+        'SELECT id, entityType, entityId, entryJson FROM sync_outbox ORDER BY updatedAt', []);
+      this.state.lastSyncChanged = this.actualChanges.size;
       this.state.progressPercent = 70;
 
       const deviceIds = this.state.remoteDevices.filter(d => d.isOnline).map(d => d.deviceId);
       if (deviceIds.length === 0) {
         this.syncing = false;
-        this.inFlightOutbox = [];
         this.inFlightDeviceIds = [];
         if (this.syncTimeout) clearTimeout(this.syncTimeout);
         this.state.progressPercent = 100;
         await this.refreshPendingCount();
-        this.state.status = this.remoteApplyFailed || this.completionAckUnsafe ? SyncStatus.ERROR :
+        this.state.status = this.remoteApplyFailed ? SyncStatus.ERROR :
           (this.state.pendingCount > 0 ? SyncStatus.OFFLINE : SyncStatus.IDLE);
         this.notifyStatusChange();
+        if (this.remoteApplyFailed) this.scheduleRetry();
         if (this.syncAgain) {
           this.syncAgain = false;
           this.scheduleSync();
         }
         return;
       }
-      this.state.lastSyncChanged = pushedCount;
       this.state.progressPercent = 70;
       // API 14 sync() is event-completed and returns void.
       this.inFlightDeviceIds = deviceIds;
       this.kvStore.sync(deviceIds, distributedKVStore.SyncMode.PUSH_PULL);
+      if (pending.length === 0) {
+        this.syncing = false;
+        this.inFlightDeviceIds = [];
+        this.state.progressPercent = 100;
+        this.state.status = this.remoteApplyFailed ? SyncStatus.ERROR :
+          (this.state.conflictCount > 0 ? SyncStatus.CONFLICT : SyncStatus.IDLE);
+        this.notifyStatusChange();
+        if (this.remoteApplyFailed) this.scheduleRetry();
+        if (this.syncAgain) {
+          this.syncAgain = false;
+          this.scheduleSync();
+        }
+        return;
+      }
       if (this.syncTimeout) clearTimeout(this.syncTimeout);
       this.syncTimeout = setTimeout(() => {
-        this.completionAckUnsafe = true;
+        if (round !== this.syncRound || !this.awaitingAck) return;
         this.syncing = false;
-        this.inFlightOutbox = [];
+        this.awaitingAck = false;
+        this.needsReconciliation = true;
         this.inFlightDeviceIds = [];
         this.state.status = SyncStatus.ERROR;
         this.refreshPendingCount().then(() => this.notifyStatusChange());
         this.scheduleRetry();
       }, 15000);
-      Logger.info(TAG, `sync started, peers=${deviceIds.length}, pushed=${pushedCount}`);
+      this.awaitingAck = true;
+      Logger.info(TAG, `sync started, peers=${deviceIds.length}, scanned=${scannedCount}`);
       this.notifyStatusChange();
     } catch (e) {
       Logger.error(TAG, `requestSync failed: ${e}`);
       if (this.syncTimeout) clearTimeout(this.syncTimeout);
       this.syncing = false;
-      this.inFlightOutbox = [];
+      this.awaitingAck = false;
+      this.needsReconciliation = true;
       this.inFlightDeviceIds = [];
       this.state.status = SyncStatus.ERROR;
       this.notifyStatusChange();
@@ -967,8 +1092,8 @@ export class DistributedDataService {
         c.remoteTimestamp + 1, (current?.updatedAt ?? 0) + 1);
       chosen.deviceId = this.state.localDeviceId;
       const chosenJson = JSON.stringify(chosen);
-      await this.commitLocalChange(c.entityType as EntityType, c.entityId, async () => {
-        await this.persistLocalEntity(c.entityType as EntityType, c.entityId, chosenJson, this.state.localDeviceId);
+      await this.commitLocalChange(c.entityType as EntityType, c.entityId, async (db: RdbSession) => {
+        await this.persistLocalEntity(c.entityType as EntityType, c.entityId, chosenJson, this.state.localDeviceId, db);
       }, current?.updatedAt ?? 0, current?.deviceId ?? '');
       await this.notifyEntityChanged(c.entityType as EntityType, c.entityId, chosen);
       const predicates = new relationalStore.RdbPredicates('sync_conflict');
@@ -978,8 +1103,6 @@ export class DistributedDataService {
       }, predicates);
       await this.refreshConflictCount();
       this.notifyStatusChange();
-      EventBus.getInstance().emit(AppEvents.FAVORITE_CHANGED, { conflictResolved: true });
-      EventBus.getInstance().emit(AppEvents.NOTE_CHANGED, { conflictResolved: true });
     } catch (e) {
       Logger.warn(TAG, `resolveConflict failed: ${e}`);
     }
@@ -1018,8 +1141,10 @@ export class DistributedDataService {
     try {
       if (!this.kvStore && this.context) await this.init(this.context);
       const available = await connection.hasDefaultNet();
+      const wasAvailable = this.state.networkAvailable;
       this.refreshRemoteDevices();
       this.state.networkAvailable = available || this.state.remoteDevices.some(d => d.isOnline);
+      if (!wasAvailable && this.state.networkAvailable) this.needsReconciliation = true;
       if (this.initialized && this.kvStore) {
         await this.requestSync();
       }

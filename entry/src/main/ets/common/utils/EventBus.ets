@@ -93,6 +93,8 @@ export class EventBus {
 export class AppEvents {
   static FAVORITE_CHANGED = 'favorite_changed';
   static NOTE_CHANGED = 'note_changed';
+  static NOTE_DRAFT_CHANGED = 'note_draft_changed';
+  static HISTORY_CHANGED = 'history_changed';
   static TOPIC_CHANGED = 'topic_changed';
   static SYNC_STATUS_CHANGED = 'sync_status_changed';
   static SYNC_CONFLICT_DETECTED = 'sync_conflict';

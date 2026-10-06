@@ -58,6 +58,7 @@ export class TopicService {
     const cs = CultureService.getInstance();
     await cs.warmCache();
     const topics = await us.listTopics();
+    const notes = await us.listNotes();
     const cards: TopicCardData[] = [];
     for (const t of topics) {
       const rels = await us.listTopicRelations(t.id);
@@ -73,7 +74,6 @@ export class TopicService {
         }
       }
       // 统计笔记数
-      const notes = await us.listNotes();
       const noteCount = notes.filter(n => {
         if (n.targetType === 'topic' && n.targetId === t.id) return true;
         // 与主题关联对象关联的笔记也算

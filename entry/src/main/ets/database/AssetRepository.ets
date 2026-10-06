@@ -6,7 +6,7 @@ import { relationalStore } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
 import { Context } from '@kit.AbilityKit';
 import { Logger } from '../common/utils/Logger';
-import { LocalRdbHelper } from './LocalRdbHelper';
+import { LocalRdbHelper, RdbSession } from './LocalRdbHelper';
 import { Site, Artifact, Poetry } from '../model/entity/Entities';
 import { DateUtil } from '../common/utils/DateUtil';
 import { PreferencesHelper } from '../common/utils/PreferencesHelper';
@@ -72,17 +72,17 @@ export class AssetRepository {
   }
 
   private static async updateContent(table: 'site' | 'artifact' | 'poetry', id: string,
-    values: relationalStore.ValuesBucket): Promise<void> {
+    values: relationalStore.ValuesBucket, db: RdbSession): Promise<void> {
     const predicates = new relationalStore.RdbPredicates(table);
     predicates.equalTo('id', id);
-    await LocalRdbHelper.update(table, values, predicates);
+    await db.update(table, values, predicates);
   }
 
   private static async importToRdb(data: PresetData, refreshExisting: boolean): Promise<void> {
-    await LocalRdbHelper.runInTransaction(async () => {
-      const siteIds = new Set((await LocalRdbHelper.query<IdRow>('SELECT id FROM site')).map(row => row.id));
-      const artifactIds = new Set((await LocalRdbHelper.query<IdRow>('SELECT id FROM artifact')).map(row => row.id));
-      const poetryIds = new Set((await LocalRdbHelper.query<IdRow>('SELECT id FROM poetry')).map(row => row.id));
+    await LocalRdbHelper.runInTransaction(async (db: RdbSession) => {
+      const siteIds = new Set((await db.query<IdRow>('SELECT id FROM site')).map(row => row.id));
+      const artifactIds = new Set((await db.query<IdRow>('SELECT id FROM artifact')).map(row => row.id));
+      const poetryIds = new Set((await db.query<IdRow>('SELECT id FROM poetry')).map(row => row.id));
       for (const site of data.sites) {
         const now = DateUtil.now();
         const content: relationalStore.ValuesBucket = {
@@ -107,13 +107,13 @@ export class AssetRepository {
           'updatedAt': site.updatedAt ?? now,
         };
         if (siteIds.has(site.id)) {
-          if (refreshExisting) await AssetRepository.updateContent('site', site.id, content);
+          if (refreshExisting) await AssetRepository.updateContent('site', site.id, content, db);
           continue;
         }
         content.id = site.id;
         content.viewCount = 0;
         content.createdAt = site.createdAt ?? now;
-        await LocalRdbHelper.insert('site', content);
+        await db.insert('site', content);
       }
       for (const a of data.artifacts) {
         const now = DateUtil.now();
@@ -135,13 +135,13 @@ export class AssetRepository {
           'updatedAt': a.updatedAt ?? now,
         };
         if (artifactIds.has(a.id)) {
-          if (refreshExisting) await AssetRepository.updateContent('artifact', a.id, content);
+          if (refreshExisting) await AssetRepository.updateContent('artifact', a.id, content, db);
           continue;
         }
         content.id = a.id;
         content.viewCount = 0;
         content.createdAt = a.createdAt ?? now;
-        await LocalRdbHelper.insert('artifact', content);
+        await db.insert('artifact', content);
       }
       for (const p of data.poetries) {
         const content: relationalStore.ValuesBucket = {
@@ -154,15 +154,15 @@ export class AssetRepository {
           'relatedCity': p.relatedCity ?? null,
         };
         if (poetryIds.has(p.id)) {
-          if (refreshExisting) await AssetRepository.updateContent('poetry', p.id, content);
-          await LocalRdbHelper.execute(
+          if (refreshExisting) await AssetRepository.updateContent('poetry', p.id, content, db);
+          await db.execute(
             'UPDATE poetry SET createdAt=? WHERE id=? AND (createdAt IS NULL OR createdAt=0)',
             [p.createdAt ?? DateUtil.now(), p.id]);
           continue;
         }
         content.id = p.id;
         content.createdAt = p.createdAt ?? DateUtil.now();
-        await LocalRdbHelper.insert('poetry', content);
+        await db.insert('poetry', content);
       }
     });
   }

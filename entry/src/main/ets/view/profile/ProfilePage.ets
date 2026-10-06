@@ -99,9 +99,8 @@ export struct ProfilePage {
             // 用户信息卡
             Row({ space: 16 }) {
               Stack({ alignContent: Alignment.Center }) {
-                Circle({ width: 64, height: 64 })
-                  .fill(colors.bgElevated)
-                  .stroke(colors.gold).strokeWidth(1)
+                Column().width(64).height(64).borderRadius(32)
+                  .backgroundColor(colors.bgElevated).border({ width: 1, color: colors.gold })
                 Text('河')
                   .fontSize(28).fontWeight(FontWeight.Bold).fontColor(colors.gold)
                   .fontFamily('HarmonyOS Sans')

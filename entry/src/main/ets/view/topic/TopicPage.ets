@@ -18,21 +18,30 @@ export struct TopicPage {
   @State newTopicDesc: string = '';
   @State newTopicIcon: string = '📜';
   @State graph: KnowledgeGraph | null = null;
+  private loadGeneration: number = 0;
   private onTopicChange = (): void => { this.load(); };
 
   aboutToAppear(): void {
     EventBus.getInstance().on(AppEvents.TOPIC_CHANGED, this.onTopicChange);
+    EventBus.getInstance().on(AppEvents.NOTE_CHANGED, this.onTopicChange);
+    EventBus.getInstance().on(AppEvents.FAVORITE_CHANGED, this.onTopicChange);
     setTimeout(() => this.load(), 50);
   }
 
   aboutToDisappear(): void {
     EventBus.getInstance().off(AppEvents.TOPIC_CHANGED, this.onTopicChange);
+    EventBus.getInstance().off(AppEvents.NOTE_CHANGED, this.onTopicChange);
+    EventBus.getInstance().off(AppEvents.FAVORITE_CHANGED, this.onTopicChange);
   }
 
   private async load(): Promise<void> {
-    this.cards = await TopicService.getInstance().getTopicCards();
-    if (this.cards.length > 0) {
-      this.graph = await TopicService.getInstance().buildKnowledgeGraph();
+    const generation = ++this.loadGeneration;
+    const cards = await TopicService.getInstance().getTopicCards();
+    const graph = cards.length > 0 ? await TopicService.getInstance().buildKnowledgeGraph() : null;
+    if (generation !== this.loadGeneration) return;
+    this.cards = cards;
+    if (cards.length > 0) {
+      this.graph = graph;
     } else {
       this.graph = null;
     }
